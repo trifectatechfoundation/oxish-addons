@@ -61,9 +61,11 @@ async fn main() -> anyhow::Result<()> {
                 if let Err(err) = stream.set_nodelay(true) {
                     warn!(%addr, %err, "failed to set TCP_NODELAY on connection");
                 }
-
-                let conn = Connection::new(stream, addr, host_key.clone())?;
-                tokio::spawn(conn.run());
+                // FIXME(aws/aws-lc-rs#975) use tokio::spawn() once StreamingDecryptingKey is Send
+                let Ok(conn) = Connection::connect(stream, addr, host_key.clone()).await else {
+                    continue; // Some kind of error happened. Has been logged already.
+                };
+                conn.run().await;
             }
             Err(error) => {
                 warn!(%error, "failed to accept connection");

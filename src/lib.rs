@@ -3,10 +3,7 @@ use std::{io, str, sync::Arc};
 
 use aws_lc_rs::signature::Ed25519KeyPair;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, error, instrument, warn};
 
 mod key_exchange;
@@ -26,36 +23,37 @@ pub struct Connection<T> {
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
-    /// Create a new [`Connection`]
-    pub fn new(stream: T, addr: SocketAddr, host_key: Arc<Ed25519KeyPair>) -> anyhow::Result<Self> {
-        Ok(Self {
+    /// Create a new [`Connection`] and do the initial key exchange
+    #[instrument(name = "connection", skip(stream))]
+    pub async fn connect(
+        stream: T,
+        addr: SocketAddr,
+        host_key: Arc<Ed25519KeyPair>,
+    ) -> Result<Self, ()> {
+        let mut conn = Self {
             stream,
             context: ConnectionContext { addr, host_key },
             read: ReadState::default(),
             write: WriteState::default(),
-        })
-    }
+        };
 
-    /// Drive the connection forward
-    #[instrument(name = "connection", skip(self), fields(addr = %self.context.addr))]
-    pub async fn run(mut self) {
         let mut exchange = HandshakeHash::default();
         let state = VersionExchange::default();
-        let state = match state.advance(&mut exchange, &mut self).await {
+        let state = match state.advance(&mut exchange, &mut conn).await {
             Ok(state) => state,
             Err(error) => {
                 error!(%error, "failed to complete version exchange");
-                return;
+                return Err(());
             }
         };
 
         // Receive and send key exchange init packets
 
-        let packet = match self.read.packet(&mut self.stream).await {
+        let packet = match conn.read.packet(&mut conn.stream).await {
             Ok(packet) => packet,
             Err(error) => {
                 error!(%error, "failed to read packet");
-                return;
+                return Err(());
             }
         };
         exchange.prefixed(packet.payload);
@@ -63,74 +61,74 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             Ok(key_exchange_init) => key_exchange_init,
             Err(error) => {
                 error!(%error, "failed to read key exchange init");
-                return;
+                return Err(());
             }
         };
 
-        let Ok((key_exchange_init, state)) = state.advance(peer_key_exchange_init, &self.context)
+        let Ok((key_exchange_init, state)) =
+            state.advance(peer_key_exchange_init, &mut conn.context)
         else {
-            return;
+            return Err(());
         };
 
-        if let Err(error) = self
+        if let Err(error) = conn
             .write
-            .write_packet(&mut self.stream, &key_exchange_init, Some(&mut exchange))
+            .write_packet(&mut conn.stream, &key_exchange_init, Some(&mut exchange))
             .await
         {
             error!(%error, "failed to send key exchange init packet");
-            return;
+            return Err(());
         }
 
         // Perform ECDH key exchange
 
-        let packet = match self.read.packet(&mut self.stream).await {
+        let packet = match conn.read.packet(&mut conn.stream).await {
             Ok(packet) => packet,
             Err(error) => {
                 error!(%error, "failed to read packet");
-                return;
+                return Err(());
             }
         };
-
         let ecdh_key_exchange_init = match EcdhKeyExchangeInit::try_from(packet) {
             Ok(key_exchange_init) => key_exchange_init,
             Err(error) => {
                 error!(%error, "failed to read ecdh key exchange init");
-                return;
+                return Err(());
             }
         };
 
         let Ok((key_exchange_reply, keys)) =
-            state.advance(ecdh_key_exchange_init, exchange, &self.context)
+            state.advance(ecdh_key_exchange_init, exchange, &conn.context)
         else {
-            return;
+            return Err(());
         };
 
-        if let Err(error) = self
+        if let Err(error) = conn
             .write
-            .write_packet(&mut self.stream, &key_exchange_reply, None)
+            .write_packet(&mut conn.stream, &key_exchange_reply, None)
             .await
         {
             warn!(%error, "failed to send key exchange init packet");
-            return;
+            return Err(());
         }
 
         // Exchange new keys packets and install new keys
 
-        if let Err(error) = self.update_keys(keys).await {
+        if let Err(error) = conn.update_keys(keys).await {
             error!(%error, "failed to update keys");
-            return;
+            return Err(());
         }
 
-        if let Err(error) = self
+        if let Err(error) = conn
             .write
-            .write_packet(&mut self.stream, &MessageType::Ignore, None)
+            .write_packet(&mut conn.stream, &MessageType::Ignore, None)
             .await
         {
             error!(%error, "failed to send ignore packet");
-            return;
+            return Err(());
         }
 
-        todo!();
+        Ok(conn)
     }
 
     async fn update_keys(&mut self, keys: RawKeySet) -> Result<(), Error> {
@@ -152,12 +150,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         Ok(())
     }
 
-    pub(crate) async fn connect(
-        stream: TcpStream,
-        addr: SocketAddr,
-        host_key: Arc<Ed25519KeyPair>,
-    ) -> anyhow::Result<Self> {
-        // complete connection till kex finished (incl sending the newkeys message)
+    /// Drive the connection forward
+    pub async fn run(mut self) {
         todo!()
     }
 
