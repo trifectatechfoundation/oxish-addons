@@ -3,23 +3,23 @@ use std::{io, str, sync::Arc};
 
 use aws_lc_rs::{digest, signature::Ed25519KeyPair};
 use thiserror::Error;
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::{
+    io::AsyncReadExt,
+    net::{tcp, TcpStream},
+};
 use tracing::{debug, warn};
 
 mod key_exchange;
 use key_exchange::KeyExchange;
 mod proto;
-use proto::{read, Decode, Decoded, Encode};
-
-use crate::proto::Packet;
+use proto::{DecryptingReader, Encode, EncryptingWriter, Packet};
 
 /// A single SSH connection
 pub struct Connection {
-    stream: TcpStream,
+    stream_read: DecryptingReader<tcp::OwnedReadHalf>,
+    stream_write: EncryptingWriter<tcp::OwnedWriteHalf>,
     addr: SocketAddr,
     host_key: Arc<Ed25519KeyPair>,
-    read_buf: Vec<u8>,
-    write_buf: Vec<u8>,
 }
 
 impl Connection {
@@ -30,12 +30,14 @@ impl Connection {
         host_key: Arc<Ed25519KeyPair>,
     ) -> anyhow::Result<Self> {
         stream.set_nodelay(true)?;
+
+        let (stream_read, stream_write) = stream.into_split();
+
         Ok(Self {
-            stream,
+            stream_read: DecryptingReader::new(stream_read),
+            stream_write: EncryptingWriter::new(stream_write),
             addr,
             host_key,
-            read_buf: Vec::with_capacity(16_384),
-            write_buf: Vec::with_capacity(16_384),
         })
     }
 
@@ -58,7 +60,7 @@ impl Connection {
         todo!();
     }
 
-    pub async fn connect(
+    pub(crate) async fn connect(
         stream: TcpStream,
         addr: SocketAddr,
         host_key: Arc<Ed25519KeyPair>,
@@ -67,12 +69,12 @@ impl Connection {
         todo!()
     }
 
-    pub async fn recv_packet(&mut self) -> anyhow::Result<Packet<'_>> {
-        todo!()
+    pub(crate) async fn recv_packet(&mut self) -> anyhow::Result<Packet<'_>> {
+        Ok(self.stream_read.read_packet().await?)
     }
 
-    pub async fn send_packet(&mut self, packet: impl Encode) -> anyhow::Result<()> {
-        todo!()
+    pub(crate) async fn send_packet(&mut self, payload: &impl Encode) -> anyhow::Result<()> {
+        Ok(self.stream_write.write_packet(payload, |_| {}).await?)
     }
 }
 
@@ -85,47 +87,49 @@ impl VersionExchange {
         exchange: &mut digest::Context,
         conn: &mut Connection,
     ) -> Result<KeyExchange, ()> {
-        let (ident, rest) =
-            match read::<Identification<'_>>(&mut conn.stream, &mut conn.read_buf).await {
-                Ok(Decoded { value: ident, next }) => {
-                    debug!(addr = %conn.addr, ?ident, "received identification");
-                    (ident, next.len())
-                }
-                Err(error) => {
-                    warn!(addr = %conn.addr, %error, "failed to read version exchange");
-                    return Err(());
-                }
-            };
+        let ident_bytes = match Identification::read_from_stream(&mut conn.stream_read).await {
+            Ok(ident_bytes) => ident_bytes,
+            Err(error) => {
+                warn!(addr = %conn.addr, %error, "failed to read version exchange");
+                return Err(());
+            }
+        };
+        let ident = match Identification::decode(&ident_bytes) {
+            Ok(ident) => {
+                debug!(addr = %conn.addr, ?ident, "received identification");
+                ident
+            }
+            Err(error) => {
+                warn!(addr = %conn.addr, %error, "failed to read version exchange");
+                return Err(());
+            }
+        };
 
         if ident.protocol != PROTOCOL {
             warn!(addr = %conn.addr, ?ident, "unsupported protocol version");
             return Err(());
         }
 
-        let v_c_len = conn.read_buf.len() - rest - 2;
-        if let Some(v_c) = conn.read_buf.get(..v_c_len) {
-            exchange.update(&(v_c.len() as u32).to_be_bytes());
-            exchange.update(v_c);
-        }
+        let v_c = &ident_bytes;
+        exchange.update(&(v_c.len() as u32).to_be_bytes());
+        exchange.update(v_c);
 
         let ident = Identification::outgoing();
-        ident.encode(&mut conn.write_buf);
-        if let Err(error) = conn.stream.write_all(&conn.write_buf).await {
+        let server_ident_bytes = ident.encode();
+        if let Err(error) = conn
+            .stream_write
+            .write_raw_cleartext(&server_ident_bytes)
+            .await
+        {
             warn!(addr = %conn.addr, %error, "failed to send version exchange");
             return Err(());
         }
 
-        let v_s_len = conn.write_buf.len() - 2;
-        if let Some(v_s) = conn.write_buf.get(..v_s_len) {
+        let v_s_len = server_ident_bytes.len() - 2;
+        if let Some(v_s) = server_ident_bytes.get(..v_s_len) {
             exchange.update(&(v_s.len() as u32).to_be_bytes());
             exchange.update(v_s);
         }
-
-        if rest > 0 {
-            let start = conn.read_buf.len() - rest;
-            conn.read_buf.copy_within(start.., 0);
-        }
-        conn.read_buf.truncate(rest);
 
         Ok(KeyExchange::for_new_session())
     }
@@ -148,17 +152,30 @@ impl Identification<'_> {
     }
 }
 
-impl<'a> Decode<'a> for Identification<'a> {
-    fn decode(bytes: &'a [u8]) -> Result<Decoded<'a, Self>, Error> {
+impl<'a> Identification<'a> {
+    /// Read the identification string as raw bytes with the CRLF stripped off.
+    async fn read_from_stream(
+        stream: &mut DecryptingReader<impl AsyncReadExt + Unpin>,
+    ) -> Result<Vec<u8>, Error> {
+        let mut data = vec![];
+        loop {
+            data.push(stream.read_u8_cleartext().await?);
+            if data.len() > 255 {
+                return Err(IdentificationError::TooLong.into());
+            }
+            if let Some((_, b"\r\n")) = data.split_last_chunk::<2>() {
+                data.pop().unwrap();
+                data.pop().unwrap();
+                break;
+            }
+        }
+        debug!(bytes = data.len(), "read from stream");
+        Ok(data)
+    }
+
+    fn decode(bytes: &'a [u8]) -> Result<Self, Error> {
         let Ok(message) = str::from_utf8(bytes) else {
             return Err(IdentificationError::InvalidUtf8.into());
-        };
-
-        let Some((message, next)) = message.split_once("\r\n") else {
-            return Err(match message.len() > 256 {
-                true => IdentificationError::TooLong.into(),
-                false => Error::Incomplete(None),
-            });
         };
 
         let Some(rest) = message.strip_prefix("SSH-") else {
@@ -174,21 +191,15 @@ impl<'a> Decode<'a> for Identification<'a> {
             None => (rest, ""),
         };
 
-        let out = Self {
+        Ok(Self {
             protocol,
             software,
             comments,
-        };
-
-        Ok(Decoded {
-            value: out,
-            next: next.as_bytes(),
         })
     }
-}
 
-impl Encode for Identification<'_> {
-    fn encode(&self, buf: &mut Vec<u8>) {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = vec![];
         buf.extend_from_slice(b"SSH-");
         buf.extend_from_slice(self.protocol.as_bytes());
         buf.push(b'-');
@@ -198,6 +209,7 @@ impl Encode for Identification<'_> {
             buf.extend_from_slice(self.comments.as_bytes());
         }
         buf.extend_from_slice(b"\r\n");
+        buf
     }
 }
 
