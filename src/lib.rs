@@ -12,7 +12,7 @@ use tracing::{debug, warn};
 mod key_exchange;
 use key_exchange::KeyExchange;
 mod proto;
-use proto::{DecryptingReader, Encode, EncryptingWriter, Packet};
+use proto::{DecryptingReader, Encode, EncryptingWriter, MessageType, Packet};
 
 /// A single SSH connection
 pub struct Connection {
@@ -62,6 +62,11 @@ impl Connection {
             }
         };
         debug!("packet data: {:x?}", packet.payload);
+
+        self.stream_write
+            .write_packet(&MessageType::Ignore, |_| {})
+            .await
+            .unwrap();
     }
 
     pub(crate) async fn recv_packet(&mut self) -> anyhow::Result<Packet<'_>> {
