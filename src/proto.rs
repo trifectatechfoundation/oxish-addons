@@ -289,6 +289,14 @@ impl<W: AsyncWriteExt + Unpin> EncryptingWriter<W> {
         Ok(())
     }
 
+    pub(crate) fn set_encryption_key(
+        &mut self,
+        encryption_key: StreamingEncryptingKey,
+        integrity_key: hmac::Key,
+    ) {
+        self.encryption_key = Some((encryption_key, integrity_key));
+    }
+
     /// Write a packet. Returns written [`Packet`].
     pub(crate) async fn write_packet(
         &mut self,
@@ -301,11 +309,29 @@ impl<W: AsyncWriteExt + Unpin> EncryptingWriter<W> {
         let packet_number = self.packet_number;
         self.packet_number = self.packet_number.wrapping_add(1);
 
+        let packet = Packet::builder(&mut self.buf).with_payload(payload);
+        update_exchange_hash(packet.payload()?);
+
         if let Some((encryption_key, integrity_key)) = &mut self.encryption_key {
-            todo!()
+            let block_len = encryption_key.algorithm().block_len();
+
+            let data = packet.without_mac()?;
+
+            self.encrypted_buf.resize(data.len() + block_len, 0);
+            let update = encryption_key
+                .update(data, &mut self.encrypted_buf)
+                .unwrap();
+            assert_eq!(update.remainder().len(), block_len);
+            self.encrypted_buf.truncate(data.len());
+
+            let mut hmac_ctx = hmac::Context::with_key(integrity_key);
+            hmac_ctx.update(&packet_number.to_be_bytes());
+            hmac_ctx.update(data);
+            let mac = hmac_ctx.sign();
+            self.encrypted_buf.extend_from_slice(mac.as_ref());
+
+            self.stream.write_all(&self.encrypted_buf).await?;
         } else {
-            let packet = Packet::builder(&mut self.buf).with_payload(payload);
-            update_exchange_hash(packet.payload()?);
             self.stream.write_all(packet.without_mac()?).await?;
         };
 
@@ -429,8 +455,6 @@ impl<'a> PacketBuilderWithPayload<'a> {
                 return Err(Error::Unreachable("failed to get random padding"));
             }
         }
-
-        buf.extend_from_slice(&[]); // mac
 
         let packet_len = (buf.len() - start - 4) as u32;
         if let Some(packet_length_dst) = buf.get_mut(start..start + 4) {

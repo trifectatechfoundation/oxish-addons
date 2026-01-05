@@ -2,7 +2,7 @@ use std::str;
 
 use aws_lc_rs::{
     agreement::{self, EphemeralPrivateKey, UnparsedPublicKey, X25519},
-    cipher::{StreamingDecryptingKey, UnboundCipherKey, AES_128},
+    cipher::{StreamingDecryptingKey, StreamingEncryptingKey, UnboundCipherKey, AES_128},
     digest, hmac,
     rand::{self, SystemRandom},
     signature::KeyPair,
@@ -167,6 +167,26 @@ impl EcdhKeyExchange {
             hmac::Key::new(
                 hmac::HMAC_SHA256,
                 &raw_keys.client_to_server.integrity_key.as_ref()[..32],
+            ),
+        );
+
+        conn.stream_write.set_encryption_key(
+            StreamingEncryptingKey::less_safe_ctr(
+                UnboundCipherKey::new(
+                    &AES_128,
+                    &raw_keys.server_to_client.encryption_key.as_ref()[..16],
+                )
+                .unwrap(),
+                aws_lc_rs::cipher::EncryptionContext::Iv128(
+                    raw_keys.server_to_client.initial_iv.as_ref()[..16]
+                        .try_into()
+                        .unwrap(),
+                ),
+            )
+            .unwrap(),
+            hmac::Key::new(
+                hmac::HMAC_SHA256,
+                &raw_keys.server_to_client.integrity_key.as_ref()[..32],
             ),
         );
 
@@ -581,7 +601,6 @@ impl<'a, T: From<&'a str>> Decode<'a> for Vec<T> {
 /// The raw hashes from which we will derive the crypto keys.
 ///
 /// <https://www.rfc-editor.org/rfc/rfc4253#section-7.2>
-#[expect(dead_code)] // FIXME implement encryption/decryption and MAC
 struct RawKeySet {
     client_to_server: RawKeys,
     server_to_client: RawKeys,
