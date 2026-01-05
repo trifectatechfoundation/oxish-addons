@@ -171,7 +171,14 @@ impl Connection {
             ),
         ));
 
-        todo!();
+        let packet = match self.read.read_packet(&mut self.stream).await {
+            Ok(packet) => packet,
+            Err(error) => {
+                warn!(addr = %self.addr, %error, "failed to read packet");
+                return;
+            }
+        };
+        debug!("packet data: {:x?}", packet.payload);
     }
 }
 
