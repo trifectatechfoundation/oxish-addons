@@ -3,17 +3,18 @@ use std::{io, str, sync::Arc};
 
 use aws_lc_rs::signature::Ed25519KeyPair;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    net::TcpStream,
+};
 use tracing::{debug, error, instrument, warn};
 
 mod key_exchange;
-use key_exchange::KeyExchange;
+use key_exchange::{EcdhKeyExchangeInit, KeyExchange, KeyExchangeInit, NewKeys, RawKeySet};
 mod proto;
-use proto::{AesCtrWriteKeys, Completion, Decoded, MessageType, ReadState, WriteState};
-
-use crate::{
-    key_exchange::{EcdhKeyExchangeInit, KeyExchangeInit, NewKeys, RawKeySet},
-    proto::{AesCtrReadKeys, Encode, HandshakeHash},
+use proto::{
+    AesCtrReadKeys, AesCtrWriteKeys, Completion, Decoded, Encode, HandshakeHash, IncomingPacket,
+    MessageType, ReadState, WriteState,
 };
 
 /// A single SSH connection
@@ -149,6 +150,23 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         self.read.decryption_key = Some(AesCtrReadKeys::new(client_to_server));
         self.write.keys = Some(AesCtrWriteKeys::new(server_to_client));
         Ok(())
+    }
+
+    pub async fn connect(
+        stream: TcpStream,
+        addr: SocketAddr,
+        host_key: Arc<Ed25519KeyPair>,
+    ) -> anyhow::Result<Self> {
+        // complete connection till kex finished (incl sending the newkeys message)
+        todo!()
+    }
+
+    pub async fn recv_packet(&mut self) -> anyhow::Result<IncomingPacket<'_>> {
+        todo!()
+    }
+
+    pub async fn send_packet(&mut self, packet: impl Encode) -> anyhow::Result<()> {
+        todo!()
     }
 }
 
