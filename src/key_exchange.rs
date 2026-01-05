@@ -7,7 +7,6 @@ use aws_lc_rs::{
     rand::{self, SystemRandom},
     signature::KeyPair,
 };
-use tokio::io::AsyncWriteExt;
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -104,16 +103,11 @@ impl EcdhKeyExchange {
             },
         };
 
-        conn.write_buf.clear();
-        let Ok(packet) = Packet::builder(&mut conn.write_buf)
-            .with_payload(&key_exchange_reply)
-            .without_mac()
-        else {
-            error!(addr = %conn.addr, "failed to build key exchange init packet");
-            return Err(());
-        };
-
-        if let Err(error) = conn.stream_write.write_all(packet).await {
+        if let Err(error) = conn
+            .stream_write
+            .write_packet(&key_exchange_reply, |_| {})
+            .await
+        {
             warn!(addr = %conn.addr, %error, "failed to send version exchange");
             return Err(());
         }
@@ -135,16 +129,11 @@ impl EcdhKeyExchange {
             return Err(());
         }
 
-        conn.write_buf.clear();
-        let Ok(packet) = Packet::builder(&mut conn.write_buf)
-            .with_payload(&MessageType::NewKeys)
-            .without_mac()
-        else {
-            error!(addr = %conn.addr, "failed to build newkeys packet");
-            return Err(());
-        };
-
-        if let Err(error) = conn.stream_write.write_all(packet).await {
+        if let Err(error) = conn
+            .stream_write
+            .write_packet(&MessageType::NewKeys, |_| {})
+            .await
+        {
             warn!(addr = %conn.addr, %error, "failed to send newkeys packet");
             return Err(());
         }
@@ -316,21 +305,15 @@ impl KeyExchange {
             }
         };
 
-        conn.write_buf.clear();
-        let builder = Packet::builder(&mut conn.write_buf).with_payload(&key_exchange_init);
-
-        if let Ok(kex_init_payload) = builder.payload() {
-            exchange.update(&(kex_init_payload.len() as u32).to_be_bytes());
-            exchange.update(kex_init_payload);
-        };
-
-        let Ok(packet) = builder.without_mac() else {
-            error!(addr = %conn.addr, "failed to build key exchange init packet");
-            return Err(());
-        };
-
-        if let Err(error) = conn.stream_write.write_all(packet).await {
-            warn!(addr = %conn.addr, %error, "failed to send version exchange");
+        if let Err(error) = conn
+            .stream_write
+            .write_packet(&key_exchange_init, |kex_init_payload| {
+                exchange.update(&(kex_init_payload.len() as u32).to_be_bytes());
+                exchange.update(kex_init_payload);
+            })
+            .await
+        {
+            warn!(addr = %conn.addr, %error, "failed to send key exchange init packet");
             return Err(());
         }
 

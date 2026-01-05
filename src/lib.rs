@@ -4,7 +4,7 @@ use std::{io, str, sync::Arc};
 use aws_lc_rs::{digest, signature::Ed25519KeyPair};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncReadExt,
     net::{tcp, TcpStream},
 };
 use tracing::{debug, warn};
@@ -12,17 +12,14 @@ use tracing::{debug, warn};
 mod key_exchange;
 use key_exchange::KeyExchange;
 mod proto;
-use proto::{DecryptingReader, Encode};
-
-use crate::proto::Packet;
+use proto::{DecryptingReader, Encode, EncryptingWriter, Packet};
 
 /// A single SSH connection
 pub struct Connection {
     stream_read: DecryptingReader<tcp::OwnedReadHalf>,
-    stream_write: tcp::OwnedWriteHalf,
+    stream_write: EncryptingWriter<tcp::OwnedWriteHalf>,
     addr: SocketAddr,
     host_key: Arc<Ed25519KeyPair>,
-    write_buf: Vec<u8>,
 }
 
 impl Connection {
@@ -38,10 +35,9 @@ impl Connection {
 
         Ok(Self {
             stream_read: DecryptingReader::new(stream_read),
-            stream_write,
+            stream_write: EncryptingWriter::new(stream_write),
             addr,
             host_key,
-            write_buf: Vec::with_capacity(16_384),
         })
     }
 
@@ -119,14 +115,18 @@ impl VersionExchange {
         exchange.update(v_c);
 
         let ident = Identification::outgoing();
-        ident.encode(&mut conn.write_buf);
-        if let Err(error) = conn.stream_write.write_all(&conn.write_buf).await {
+        let server_ident_bytes = ident.encode();
+        if let Err(error) = conn
+            .stream_write
+            .write_raw_cleartext(&server_ident_bytes)
+            .await
+        {
             warn!(addr = %conn.addr, %error, "failed to send version exchange");
             return Err(());
         }
 
-        let v_s_len = conn.write_buf.len() - 2;
-        if let Some(v_s) = conn.write_buf.get(..v_s_len) {
+        let v_s_len = server_ident_bytes.len() - 2;
+        if let Some(v_s) = server_ident_bytes.get(..v_s_len) {
             exchange.update(&(v_s.len() as u32).to_be_bytes());
             exchange.update(v_s);
         }
@@ -197,10 +197,9 @@ impl<'a> Identification<'a> {
             comments,
         })
     }
-}
 
-impl Encode for Identification<'_> {
-    fn encode(&self, buf: &mut Vec<u8>) {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = vec![];
         buf.extend_from_slice(b"SSH-");
         buf.extend_from_slice(self.protocol.as_bytes());
         buf.push(b'-');
@@ -210,6 +209,7 @@ impl Encode for Identification<'_> {
             buf.extend_from_slice(self.comments.as_bytes());
         }
         buf.extend_from_slice(b"\r\n");
+        buf
     }
 }
 

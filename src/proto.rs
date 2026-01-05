@@ -1,8 +1,11 @@
 use core::iter;
 use std::io;
 
-use aws_lc_rs::{cipher::StreamingDecryptingKey, constant_time, hmac, rand};
-use tokio::io::AsyncReadExt;
+use aws_lc_rs::{
+    cipher::{StreamingDecryptingKey, StreamingEncryptingKey},
+    constant_time, hmac, rand,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::debug;
 
 use crate::Error;
@@ -254,6 +257,59 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
 
             Ok(packet)
         }
+    }
+}
+
+pub(crate) struct EncryptingWriter<W: AsyncWriteExt + Unpin> {
+    stream: W,
+    buf: Vec<u8>,
+    encrypted_buf: Vec<u8>,
+
+    packet_number: u32,
+    encryption_key: Option<(StreamingEncryptingKey, hmac::Key)>,
+}
+
+impl<W: AsyncWriteExt + Unpin> EncryptingWriter<W> {
+    pub(crate) fn new(stream: W) -> Self {
+        Self {
+            stream,
+            buf: Vec::with_capacity(16_384),
+            encrypted_buf: Vec::with_capacity(16_384),
+            packet_number: 0,
+            encryption_key: None,
+        }
+    }
+
+    /// Write raw bytes without packet structure or encryption.
+    ///
+    /// This should only be used for writing the identification string.
+    pub(crate) async fn write_raw_cleartext(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        assert!(self.encryption_key.is_none());
+        self.stream.write_all(bytes).await?;
+        Ok(())
+    }
+
+    /// Write a packet. Returns written [`Packet`].
+    pub(crate) async fn write_packet(
+        &mut self,
+        payload: &impl Encode,
+        update_exchange_hash: impl FnOnce(&[u8]),
+    ) -> Result<(), Error> {
+        self.buf.clear();
+        self.encrypted_buf.clear();
+
+        let packet_number = self.packet_number;
+        self.packet_number = self.packet_number.wrapping_add(1);
+
+        if let Some((encryption_key, integrity_key)) = &mut self.encryption_key {
+            todo!()
+        } else {
+            let packet = Packet::builder(&mut self.buf).with_payload(payload);
+            update_exchange_hash(packet.payload()?);
+            self.stream.write_all(packet.without_mac()?).await?;
+        };
+
+        Ok(())
     }
 }
 
