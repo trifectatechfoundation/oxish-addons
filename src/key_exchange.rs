@@ -1,4 +1,4 @@
-use std::{str, sync::Arc};
+use std::{io::Write, str, sync::Arc};
 
 use aws_lc_rs::{
     agreement::{self, EphemeralPrivateKey, UnparsedPublicKey, X25519},
@@ -16,6 +16,7 @@ use crate::{
 };
 
 pub(crate) struct EcdhKeyExchange {
+    cookie: [u8; 16],
     /// The current session id or `None` if this is the initial key exchange.
     session_id: Option<digest::Digest>,
 }
@@ -81,6 +82,32 @@ impl EcdhKeyExchange {
                 signature,
             },
         };
+
+        if std::env::var("OXISH_ENABLE_KEYLOG").as_deref() == Ok("1") {
+            #[allow(clippy::assertions_on_constants)]
+            {
+                assert!(cfg!(debug_assertions));
+            }
+            eprintln!("Logging shared secret to ssh_keylog file!");
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("ssh_keylog")
+                .unwrap()
+                .write_all(
+                    format!(
+                        "{:032x} SHARED_SECRET {}\n",
+                        u128::from_be_bytes(self.cookie),
+                        shared_secret
+                            .iter()
+                            .map(|&byte| format!("{byte:02X}"))
+                            .collect::<Vec<_>>()
+                            .join("")
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        }
 
         // The first exchange hash is used as session id.
         let derivation = KeyDerivation {
@@ -221,9 +248,11 @@ impl KeyExchange {
             return Err(());
         }
 
+        let cookie = key_exchange_init.cookie;
         Ok((
             key_exchange_init,
             EcdhKeyExchange {
+                cookie,
                 session_id: self.session_id,
             },
         ))
