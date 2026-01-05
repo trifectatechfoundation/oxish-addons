@@ -8,11 +8,12 @@ use tracing::{debug, error, instrument, warn};
 
 mod key_exchange;
 use key_exchange::{EcdhKeyExchangeInit, KeyExchange, KeyExchangeInit, NewKeys, RawKeySet};
-mod proto;
+pub mod proto;
 use proto::{
     AesCtrReadKeys, AesCtrWriteKeys, Completion, Decoded, Encode, HandshakeHash, IncomingPacket,
     MessageType, ReadState, WriteState,
 };
+pub mod service;
 
 /// A single SSH connection
 pub struct Connection<T> {
@@ -159,7 +160,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         Ok(self.read.packet(&mut self.stream).await?)
     }
 
-    pub(crate) async fn send_packet(&mut self, payload: &impl Encode) -> anyhow::Result<()> {
+    pub(crate) async fn send_packet(
+        &mut self,
+        payload: &(impl Encode + ?Sized),
+    ) -> anyhow::Result<()> {
         Ok(self
             .write
             .write_packet(&mut self.stream, payload, None)

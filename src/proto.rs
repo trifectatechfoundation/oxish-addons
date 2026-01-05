@@ -258,7 +258,7 @@ impl WriteState {
     pub(crate) async fn write_packet(
         &mut self,
         stream: &mut (impl AsyncWrite + Unpin),
-        payload: &impl Encode,
+        payload: &(impl Encode + ?Sized),
         exchange_hash: Option<&mut HandshakeHash>,
     ) -> Result<(), Error> {
         self.handle_packet(payload, exchange_hash)?;
@@ -270,7 +270,7 @@ impl WriteState {
 
     fn handle_packet(
         &mut self,
-        payload: &impl Encode,
+        payload: &(impl Encode + ?Sized),
         exchange_hash: Option<&mut HandshakeHash>,
     ) -> Result<(), Error> {
         self.buf.clear();
@@ -391,6 +391,9 @@ impl Default for HandshakeHash {
     }
 }
 
+// Message type for the transport layer and key exchange messages.
+// Note: this MUST map service messages to the unknown type, otherwise
+// the service manager will not work right.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MessageType {
     Disconnect,
@@ -458,7 +461,7 @@ impl From<MessageType> for u8 {
     }
 }
 
-pub(crate) struct IncomingPacket<'a> {
+pub struct IncomingPacket<'a> {
     pub(crate) payload: &'a [u8],
 }
 
@@ -473,7 +476,7 @@ struct EncodedPacket<'a> {
 impl<'a> EncodedPacket<'a> {
     fn new(
         buf: &'a mut Vec<u8>,
-        payload: &impl Encode,
+        payload: &(impl Encode + ?Sized),
         cipher_block_len: usize,
     ) -> Result<Self, Error> {
         let start = buf.len();
@@ -665,7 +668,7 @@ impl<'a> Decode<'a> for u8 {
     }
 }
 
-pub(crate) trait Encode {
+pub trait Encode {
     fn encode(&self, buf: &mut Vec<u8>);
 }
 
