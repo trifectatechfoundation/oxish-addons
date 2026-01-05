@@ -152,7 +152,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         Ok(())
     }
 
-    pub async fn connect(
+    pub(crate) async fn connect(
         stream: TcpStream,
         addr: SocketAddr,
         host_key: Arc<Ed25519KeyPair>,
@@ -161,12 +161,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         todo!()
     }
 
-    pub async fn recv_packet(&mut self) -> anyhow::Result<IncomingPacket<'_>> {
-        todo!()
+    pub(crate) async fn recv_packet(&mut self) -> anyhow::Result<IncomingPacket<'_>> {
+        Ok(self.read.packet(&mut self.stream).await?)
     }
 
-    pub async fn send_packet(&mut self, packet: impl Encode) -> anyhow::Result<()> {
-        todo!()
+    pub(crate) async fn send_packet(&mut self, payload: &impl Encode) -> anyhow::Result<()> {
+        Ok(self
+            .write
+            .write_packet(&mut self.stream, payload, None)
+            .await?)
     }
 }
 
