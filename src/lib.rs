@@ -23,49 +23,37 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Create a new [`Connection`]
-    pub fn new(
+    /// Create a new [`Connection`] and do the initial key exchange
+    pub async fn connect(
         stream: TcpStream,
         addr: SocketAddr,
         host_key: Arc<Ed25519KeyPair>,
-    ) -> anyhow::Result<Self> {
-        stream.set_nodelay(true)?;
+    ) -> Result<Connection, ()> {
+        if let Err(error) = stream.set_nodelay(true) {
+            warn!(addr = %addr, %error, "failed to set nodelay");
+            return Err(());
+        }
 
         let (stream_read, stream_write) = stream.into_split();
 
-        Ok(Self {
+        let mut connection = Self {
             stream_read: DecryptingReader::new(stream_read),
             stream_write: EncryptingWriter::new(stream_write),
             addr,
             host_key,
-        })
+        };
+
+        let mut exchange = digest::Context::new(&digest::SHA256);
+        let state = VersionExchange::default();
+        let state = state.advance(&mut exchange, &mut connection).await?;
+        let state = state.advance(&mut exchange, &mut connection).await?;
+        state.advance(exchange, &mut connection).await?;
+
+        Ok(connection)
     }
 
     /// Drive the connection forward
     pub async fn run(mut self) {
-        let mut exchange = digest::Context::new(&digest::SHA256);
-        let state = VersionExchange::default();
-        let Ok(state) = state.advance(&mut exchange, &mut self).await else {
-            return;
-        };
-
-        let Ok(state) = state.advance(&mut exchange, &mut self).await else {
-            return;
-        };
-
-        let Ok(()) = state.advance(exchange, &mut self).await else {
-            return;
-        };
-
-        todo!();
-    }
-
-    pub(crate) async fn connect(
-        stream: TcpStream,
-        addr: SocketAddr,
-        host_key: Arc<Ed25519KeyPair>,
-    ) -> anyhow::Result<Self> {
-        // complete connection till kex finished (incl sending the newkeys message)
         todo!()
     }
 
