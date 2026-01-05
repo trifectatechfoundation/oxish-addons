@@ -10,6 +10,9 @@ use tracing::debug;
 
 use crate::Error;
 
+// Message type for the transport layer and key exchange messages.
+// Note: this MUST map service messages to the unknown type, otherwise
+// the service manager will not work right.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MessageType {
     Disconnect,
@@ -300,7 +303,7 @@ impl<W: AsyncWriteExt + Unpin> EncryptingWriter<W> {
     /// Write a packet. Returns written [`Packet`].
     pub(crate) async fn write_packet(
         &mut self,
-        payload: &impl Encode,
+        payload: &(impl Encode + ?Sized),
         update_exchange_hash: impl FnOnce(&[u8]),
     ) -> Result<(), Error> {
         self.buf.clear();
@@ -339,8 +342,8 @@ impl<W: AsyncWriteExt + Unpin> EncryptingWriter<W> {
     }
 }
 
-pub(crate) struct Packet<'a> {
-    pub(crate) payload: &'a [u8],
+pub struct Packet<'a> {
+    pub payload: &'a [u8],
 }
 
 impl<'a> Packet<'a> {
@@ -400,7 +403,10 @@ pub(crate) struct PacketBuilder<'a> {
 }
 
 impl<'a> PacketBuilder<'a> {
-    pub(crate) fn with_payload(self, payload: &impl Encode) -> PacketBuilderWithPayload<'a> {
+    pub(crate) fn with_payload(
+        self,
+        payload: &(impl Encode + ?Sized),
+    ) -> PacketBuilderWithPayload<'a> {
         let Self { buf, start } = self;
         payload.encode(buf);
         PacketBuilderWithPayload { buf, start }
@@ -575,7 +581,7 @@ impl<'a> Decode<'a> for u8 {
     }
 }
 
-pub(crate) trait Encode {
+pub trait Encode {
     fn encode(&self, buf: &mut Vec<u8>);
 }
 
