@@ -58,8 +58,11 @@ async fn main() -> anyhow::Result<()> {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 debug!(%addr, "accepted connection");
-                let conn = Connection::new(stream, addr, host_key.clone())?;
-                conn.run().await; // FIXME(aws/aws-lc-rs#975) use tokio::spawn() once StreamingDecryptingKey is Send
+                // FIXME(aws/aws-lc-rs#975) use tokio::spawn() once StreamingDecryptingKey is Send
+                let Ok(conn) = Connection::connect(stream, addr, host_key.clone()).await else {
+                    continue; // Some kind of error happened. Has been logged already.
+                };
+                conn.run().await;
             }
             Err(error) => {
                 warn!(%error, "failed to accept connection");
