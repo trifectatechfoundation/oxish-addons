@@ -11,8 +11,9 @@ use tracing::{debug, warn};
 
 mod key_exchange;
 use key_exchange::KeyExchange;
-mod proto;
+pub mod proto;
 use proto::{DecryptingReader, Encode, EncryptingWriter, Packet};
+pub mod service;
 
 /// A single SSH connection
 pub struct Connection {
@@ -61,7 +62,10 @@ impl Connection {
         Ok(self.stream_read.read_packet().await?)
     }
 
-    pub(crate) async fn send_packet(&mut self, payload: &impl Encode) -> anyhow::Result<()> {
+    pub(crate) async fn send_packet(
+        &mut self,
+        payload: &(impl Encode + ?Sized),
+    ) -> anyhow::Result<()> {
         Ok(self.stream_write.write_packet(payload, |_| {}).await?)
     }
 }
