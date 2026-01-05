@@ -60,7 +60,7 @@ impl Connection {
         todo!();
     }
 
-    pub async fn connect(
+    pub(crate) async fn connect(
         stream: TcpStream,
         addr: SocketAddr,
         host_key: Arc<Ed25519KeyPair>,
@@ -69,12 +69,12 @@ impl Connection {
         todo!()
     }
 
-    pub async fn recv_packet(&mut self) -> anyhow::Result<Packet<'_>> {
-        todo!()
+    pub(crate) async fn recv_packet(&mut self) -> anyhow::Result<Packet<'_>> {
+        Ok(self.stream_read.read_packet().await?)
     }
 
-    pub async fn send_packet(&mut self, packet: impl Encode) -> anyhow::Result<()> {
-        todo!()
+    pub(crate) async fn send_packet(&mut self, payload: &impl Encode) -> anyhow::Result<()> {
+        Ok(self.stream_write.write_packet(payload, |_| {}).await?)
     }
 }
 
