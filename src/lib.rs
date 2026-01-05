@@ -59,7 +59,14 @@ impl Connection {
             return;
         };
 
-        todo!();
+        let packet = match self.stream_read.read_packet().await {
+            Ok(packet) => packet,
+            Err(error) => {
+                warn!(addr = %self.addr, %error, "failed to read packet");
+                return;
+            }
+        };
+        debug!("packet data: {:x?}", packet.payload);
     }
 }
 
