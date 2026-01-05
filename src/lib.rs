@@ -67,6 +67,11 @@ impl Connection {
             }
         };
         debug!("packet data: {:x?}", packet.payload);
+
+        /*self.stream_write
+        .write_packet(&MessageType::Ignore, |_| {})
+        .await
+        .unwrap();*/
     }
 }
 
