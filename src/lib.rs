@@ -9,6 +9,7 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
+pub mod auth;
 mod key_exchange;
 use key_exchange::KeyExchange;
 pub mod proto;
