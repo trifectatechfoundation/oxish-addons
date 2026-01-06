@@ -8,7 +8,7 @@ use std::{
 use aws_lc_rs::signature::Ed25519KeyPair;
 use clap::Parser;
 use listenfd::ListenFd;
-use oxish::SshTransportConnection;
+use oxish::{service::ServiceRunner, SshTransportConnection};
 use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
 
@@ -64,7 +64,9 @@ async fn main() -> anyhow::Result<()> {
                 else {
                     continue; // Some kind of error happened. Has been logged already.
                 };
-                conn.run().await;
+                ServiceRunner::new(conn, |_service_name, _packet_sender| None)
+                    .run()
+                    .await;
             }
             Err(error) => {
                 warn!(%error, "failed to accept connection");
