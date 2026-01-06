@@ -13,6 +13,17 @@ pub trait Service {
     fn handle_packet(&mut self, packet: IncomingPacket<'_>);
 }
 
+/// Simple do-nothing service for debugging
+pub struct NoopService;
+
+impl Service for NoopService {
+    fn packet_types(&self) -> &'static [u8] {
+        &[]
+    }
+
+    fn handle_packet(&mut self, _packet: IncomingPacket<'_>) {}
+}
+
 pub struct ServiceRunner<F, T> {
     services: Vec<Box<dyn Service>>,
     outgoing_receiver: tokio::sync::mpsc::UnboundedReceiver<Box<dyn Encode>>,
