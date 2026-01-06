@@ -151,11 +151,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SshTransportConnection<T> {
         Ok(())
     }
 
-    /// Drive the connection forward
-    pub async fn run(mut self) {
-        todo!()
-    }
-
     pub(crate) async fn recv_packet(&mut self) -> anyhow::Result<IncomingPacket<'_>> {
         Ok(self.read.packet(&mut self.stream).await?)
     }
