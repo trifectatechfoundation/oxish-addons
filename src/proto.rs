@@ -221,6 +221,7 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
                 value: packet,
                 next,
             } = Packet::decode(
+                packet_number,
                 &self.decrypted_buf
                     [self.unread_start..self.unread_start + 4 + packet_length.inner as usize],
             )?;
@@ -252,6 +253,7 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
                 value: packet,
                 next,
             } = Packet::decode(
+                packet_number,
                 &self.buf[self.unread_start..self.unread_start + 4 + packet_length.inner as usize],
             )?;
             assert!(next.is_empty());
@@ -343,7 +345,8 @@ impl<W: AsyncWriteExt + Unpin> EncryptingWriter<W> {
 }
 
 pub struct Packet<'a> {
-    pub payload: &'a [u8],
+    pub(crate) number: u32,
+    pub(crate) payload: &'a [u8],
 }
 
 impl<'a> Packet<'a> {
@@ -356,7 +359,7 @@ impl<'a> Packet<'a> {
 }
 
 impl<'a> Packet<'a> {
-    fn decode(bytes: &'a [u8]) -> Result<Decoded<'a, Self>, Error> {
+    fn decode(number: u32, bytes: &'a [u8]) -> Result<Decoded<'a, Self>, Error> {
         let Decoded {
             value: packet_length,
             next,
@@ -391,7 +394,7 @@ impl<'a> Packet<'a> {
         // No MAC support yet
 
         Ok(Decoded {
-            value: Self { payload },
+            value: Self { number, payload },
             next,
         })
     }
