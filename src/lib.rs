@@ -54,15 +54,15 @@ impl SshTransportConnection {
         Ok(connection)
     }
 
-    pub(crate) async fn recv_packet(&mut self) -> anyhow::Result<Packet<'_>> {
-        Ok(self.stream_read.read_packet().await?)
+    pub(crate) async fn recv_packet(&mut self) -> Result<Packet<'_>, Error> {
+        self.stream_read.read_packet().await
     }
 
     pub(crate) async fn send_packet(
         &mut self,
         payload: &(impl Encode + ?Sized),
-    ) -> anyhow::Result<()> {
-        Ok(self.stream_write.write_packet(payload, |_| {}).await?)
+    ) -> Result<(), Error> {
+        self.stream_write.write_packet(payload, |_| {}).await
     }
 }
 
