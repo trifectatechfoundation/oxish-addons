@@ -217,7 +217,9 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
                     + 4
                     + packet_length.inner as usize
                     + integrity_key.algorithm().digest_algorithm().output_len];
-            constant_time::verify_slices_are_equal(actual_mac.as_ref(), expected_mac).unwrap(); // FIXME report error
+            if constant_time::verify_slices_are_equal(actual_mac.as_ref(), expected_mac).is_err() {
+                return Err(Error::InvalidMac);
+            }
 
             let Decoded {
                 value: packet,
