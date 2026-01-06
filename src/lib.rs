@@ -15,21 +15,21 @@ pub mod proto;
 use proto::{DecryptingReader, Encode, EncryptingWriter, Packet};
 pub mod service;
 
-/// A single SSH connection
-pub struct Connection {
+/// A low level ssh transport layer protocol connection
+pub struct SshTransportConnection {
     stream_read: DecryptingReader<tcp::OwnedReadHalf>,
     stream_write: EncryptingWriter<tcp::OwnedWriteHalf>,
     addr: SocketAddr,
     host_key: Arc<Ed25519KeyPair>,
 }
 
-impl Connection {
+impl SshTransportConnection {
     /// Create a new [`Connection`] and do the initial key exchange
     pub async fn connect(
         stream: TcpStream,
         addr: SocketAddr,
         host_key: Arc<Ed25519KeyPair>,
-    ) -> Result<Connection, ()> {
+    ) -> Result<Self, ()> {
         if let Err(error) = stream.set_nodelay(true) {
             warn!(addr = %addr, %error, "failed to set nodelay");
             return Err(());
@@ -77,7 +77,7 @@ impl VersionExchange {
     async fn advance(
         &self,
         exchange: &mut digest::Context,
-        conn: &mut Connection,
+        conn: &mut SshTransportConnection,
     ) -> Result<KeyExchange, ()> {
         let ident_bytes = match Identification::read_from_stream(&mut conn.stream_read).await {
             Ok(ident_bytes) => ident_bytes,

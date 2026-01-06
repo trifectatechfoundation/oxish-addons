@@ -11,7 +11,7 @@ use tracing::{debug, error, warn};
 
 use crate::{
     proto::{with_mpint_bytes, Decode, Decoded, Encode, MessageType, Packet},
-    Connection, Error,
+    Error, SshTransportConnection,
 };
 
 pub(crate) struct EcdhKeyExchange {
@@ -24,7 +24,7 @@ impl EcdhKeyExchange {
     pub(crate) async fn advance(
         self,
         mut exchange: digest::Context,
-        conn: &mut Connection,
+        conn: &mut SshTransportConnection,
     ) -> Result<(), ()> {
         let packet = match conn.stream_read.read_packet().await {
             Ok(packet) => packet,
@@ -323,7 +323,7 @@ impl KeyExchange {
     pub(crate) async fn advance(
         self,
         exchange: &mut digest::Context,
-        conn: &mut Connection,
+        conn: &mut SshTransportConnection,
     ) -> Result<EcdhKeyExchange, ()> {
         let packet = match conn.stream_read.read_packet().await {
             Ok(packet) => packet,
