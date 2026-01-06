@@ -315,7 +315,7 @@ impl<W: AsyncWriteExt + Unpin> EncryptingWriter<W> {
         if let Some((encryption_key, integrity_key)) = &mut self.encryption_key {
             let block_len = encryption_key.algorithm().block_len();
 
-            let data = packet.without_mac()?;
+            let data = packet.without_mac(block_len)?;
 
             self.encrypted_buf.resize(data.len() + block_len, 0);
             let update = encryption_key
@@ -332,7 +332,7 @@ impl<W: AsyncWriteExt + Unpin> EncryptingWriter<W> {
 
             self.stream.write_all(&self.encrypted_buf).await?;
         } else {
-            self.stream.write_all(packet.without_mac()?).await?;
+            self.stream.write_all(packet.without_mac(0)?).await?;
         };
 
         Ok(())
@@ -419,7 +419,7 @@ impl<'a> PacketBuilderWithPayload<'a> {
             .ok_or(Error::Unreachable("unable to extract packet"))
     }
 
-    pub(crate) fn without_mac(self) -> Result<&'a [u8], Error> {
+    pub(crate) fn without_mac(self, cipher_block_len: usize) -> Result<&'a [u8], Error> {
         let Self { buf, start } = self;
 
         // <https://www.rfc-editor.org/rfc/rfc4253#section-6>
@@ -438,9 +438,10 @@ impl<'a> PacketBuilderWithPayload<'a> {
         // decrypt the length after receiving the first 8 (or cipher block size,
         // whichever is larger) bytes of a packet.
 
-        let min_padding = 8 - (buf.len() - start) % 8;
+        let block_size = cipher_block_len.max(8);
+        let min_padding = block_size - (buf.len() - start) % block_size;
         let padding_len = match min_padding < 4 {
-            true => min_padding + 8,
+            true => min_padding + block_size,
             false => min_padding,
         };
 
