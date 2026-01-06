@@ -24,7 +24,7 @@ impl Service for NoopService {
 }
 
 pub struct ServiceRunner<F> {
-    services: Vec<Box<dyn Service>>,
+    service: Option<Box<dyn Service>>,
     outgoing_receiver: tokio::sync::mpsc::UnboundedReceiver<Box<dyn Encode>>,
     outgoing_sender: tokio::sync::mpsc::UnboundedSender<Box<dyn Encode>>,
     connection: SshTransportConnection,
@@ -119,7 +119,7 @@ impl<
     pub fn new(connection: SshTransportConnection, service_provider: F) -> Self {
         let (outgoing_sender, outgoing_receiver) = tokio::sync::mpsc::unbounded_channel();
         Self {
-            services: vec![],
+            service: None,
             outgoing_receiver,
             outgoing_sender,
             connection,
@@ -155,11 +155,11 @@ impl<
                                 }) => {
                                     let sequence_no = packet.number;
                                     let mut handled = false;
-                                    for service in self.services.iter_mut() {
+                                    if let Some(ref mut service) = self.service {
+                                        // FIXME: make this a let chain once we move to Rust2024
                                         if service.packet_types().contains(&v) {
                                             service.handle_packet(packet);
                                             handled = true;
-                                            break;
                                         }
                                     }
                                     if !handled {
@@ -199,7 +199,20 @@ impl<
                                         service_name,
                                         self.outgoing_sender.clone(),
                                     ) {
-                                        self.services.push(service);
+                                        if self.service.is_none() {
+                                            self.service = Some(service);
+                                        } else {
+                                            if let Err(e) = self
+                                                .connection
+                                                .send_packet(&DisconnectMsg(
+                                                    DisconnectReason::ProtocolError,
+                                                ))
+                                                .await
+                                            {
+                                                debug!("Error sending packet: {e}");
+                                            }
+                                            return;
+                                        }
                                         let packet = ServiceAcceptMsg {
                                             name: service_name.to_vec().into(),
                                         };
