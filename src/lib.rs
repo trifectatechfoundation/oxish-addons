@@ -2,7 +2,7 @@ use core::net::SocketAddr;
 use std::{io, str, sync::Arc};
 
 use aws_lc_rs::{
-    cipher::{self, StreamingDecryptingKey, UnboundCipherKey},
+    cipher::{self, StreamingDecryptingKey, StreamingEncryptingKey, UnboundCipherKey},
     hmac,
     signature::Ed25519KeyPair,
 };
@@ -11,12 +11,12 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 mod key_exchange;
 use key_exchange::KeyExchange;
 mod proto;
-use proto::{Decode, Decoded, Encode, MessageType, Packet, ReadState};
+use proto::{Decode, Decoded, MessageType, ReadState, WriteState};
 
 use crate::{
     key_exchange::{EcdhKeyExchangeInit, KeyExchangeInit},
@@ -29,7 +29,7 @@ pub struct Connection {
     addr: SocketAddr,
     host_key: Arc<Ed25519KeyPair>,
     read: ReadState,
-    write_buf: Vec<u8>,
+    write: WriteState,
 }
 
 impl Connection {
@@ -45,7 +45,7 @@ impl Connection {
             addr,
             host_key,
             read: ReadState::default(),
-            write_buf: Vec::with_capacity(16_384),
+            write: WriteState::new(),
         })
     }
 
@@ -73,20 +73,24 @@ impl Connection {
             }
         };
 
-        self.write_buf.clear();
         let mut cx = ConnectionContext {
             addr: self.addr,
             host_key: &self.host_key,
-            write_buf: &mut self.write_buf,
         };
 
-        let Ok((packet, state)) = state.advance(peer_key_exchange_init, &mut exchange, &mut cx)
-        else {
+        let Ok((key_exchange_init, state)) = state.advance(peer_key_exchange_init, &mut cx) else {
             return;
         };
 
-        if let Err(error) = self.stream.write_all(&packet).await {
-            error!(addr = %self.addr, %error, "failed to send ECDH key exchange reply");
+        if let Err(error) = self
+            .write
+            .write_packet(&mut self.stream, &key_exchange_init, |kex_init_payload| {
+                exchange.update(&(kex_init_payload.len() as u32).to_be_bytes());
+                exchange.update(kex_init_payload);
+            })
+            .await
+        {
+            warn!(addr = %self.addr, %error, "failed to send key exchange init packet");
             return;
         }
 
@@ -101,19 +105,23 @@ impl Connection {
             return;
         };
 
-        self.write_buf.clear();
         let mut cx = ConnectionContext {
             addr: self.addr,
             host_key: &self.host_key,
-            write_buf: &mut self.write_buf,
         };
 
-        let Ok((packet, keys)) = state.advance(ecdh_key_exchange_init, exchange, &mut cx) else {
+        let Ok((key_exchange_reply, keys)) =
+            state.advance(ecdh_key_exchange_init, exchange, &mut cx)
+        else {
             return;
         };
 
-        if let Err(error) = self.stream.write_all(&packet).await {
-            error!(addr = %self.addr, %error, "failed to send ECDH key exchange reply");
+        if let Err(error) = self
+            .write
+            .write_packet(&mut self.stream, &key_exchange_reply, |_| {})
+            .await
+        {
+            warn!(addr = %self.addr, %error, "failed to send key exchange init packet");
             return;
         }
 
@@ -139,16 +147,11 @@ impl Connection {
             return;
         }
 
-        self.write_buf.clear();
-        let Ok(packet) = Packet::builder(&mut self.write_buf)
-            .with_payload(&MessageType::NewKeys)
-            .without_mac()
-        else {
-            error!(addr = %self.addr, "failed to build newkeys packet");
-            return;
-        };
-
-        if let Err(error) = self.stream.write_all(&packet).await {
+        if let Err(error) = self
+            .write
+            .write_packet(&mut self.stream, &MessageType::NewKeys, |_| {})
+            .await
+        {
             warn!(addr = %self.addr, %error, "failed to send newkeys packet");
             return;
         }
@@ -171,6 +174,24 @@ impl Connection {
             ),
         ));
 
+        self.write.set_encryption_key(
+            StreamingEncryptingKey::less_safe_ctr(
+                UnboundCipherKey::new(
+                    &cipher::AES_128,
+                    &keys.server_to_client.encryption_key.derive::<16>(),
+                )
+                .unwrap(),
+                cipher::EncryptionContext::Iv128(
+                    keys.server_to_client.initial_iv.derive::<16>().into(),
+                ),
+            )
+            .unwrap(),
+            hmac::Key::new(
+                hmac::HMAC_SHA256,
+                &keys.server_to_client.integrity_key.derive::<32>(),
+            ),
+        );
+
         let packet = match self.read.read_packet(&mut self.stream).await {
             Ok(packet) => packet,
             Err(error) => {
@@ -179,13 +200,17 @@ impl Connection {
             }
         };
         debug!("packet data: {:x?}", packet.payload);
+
+        self.write
+            .write_packet(&mut self.stream, &MessageType::Ignore, |_| {})
+            .await
+            .unwrap();
     }
 }
 
 struct ConnectionContext<'a> {
     addr: SocketAddr,
     host_key: &'a Ed25519KeyPair,
-    write_buf: &'a mut Vec<u8>,
 }
 
 #[derive(Default)]
@@ -224,14 +249,14 @@ impl VersionExchange {
         exchange.prefixed(&ident_bytes);
 
         let ident = Identification::outgoing();
-        ident.encode(&mut conn.write_buf);
-        if let Err(error) = conn.stream.write_all(&conn.write_buf).await {
+        let server_ident_bytes = ident.encode();
+        if let Err(error) = conn.stream.write_all(&server_ident_bytes).await {
             warn!(addr = %conn.addr, %error, "failed to send version exchange");
             return Err(());
         }
 
-        let v_s_len = conn.write_buf.len() - 2;
-        if let Some(v_s) = conn.write_buf.get(..v_s_len) {
+        let v_s_len = server_ident_bytes.len() - 2;
+        if let Some(v_s) = server_ident_bytes.get(..v_s_len) {
             exchange.prefixed(v_s);
         }
 
@@ -313,10 +338,9 @@ impl<'a> Identification<'a> {
             comments,
         })
     }
-}
 
-impl Encode for Identification<'_> {
-    fn encode(&self, buf: &mut Vec<u8>) {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = vec![];
         buf.extend_from_slice(b"SSH-");
         buf.extend_from_slice(self.protocol.as_bytes());
         buf.push(b'-');
@@ -326,6 +350,7 @@ impl Encode for Identification<'_> {
             buf.extend_from_slice(self.comments.as_bytes());
         }
         buf.extend_from_slice(b"\r\n");
+        buf
     }
 }
 
