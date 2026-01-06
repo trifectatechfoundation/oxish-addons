@@ -53,11 +53,6 @@ impl SshTransportConnection {
         Ok(connection)
     }
 
-    /// Drive the connection forward
-    pub async fn run(mut self) {
-        todo!()
-    }
-
     pub(crate) async fn recv_packet(&mut self) -> anyhow::Result<Packet<'_>> {
         Ok(self.stream_read.read_packet().await?)
     }
