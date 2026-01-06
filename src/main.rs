@@ -8,7 +8,11 @@ use std::{
 use aws_lc_rs::signature::Ed25519KeyPair;
 use clap::Parser;
 use listenfd::ListenFd;
-use oxish::{service::ServiceRunner, SshTransportConnection};
+use oxish::{
+    auth::AuthService,
+    service::{NoopService, ServiceRunner},
+    SshTransportConnection,
+};
 use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
 
@@ -64,9 +68,25 @@ async fn main() -> anyhow::Result<()> {
                 else {
                     continue; // Some kind of error happened. Has been logged already.
                 };
-                ServiceRunner::new(conn, |_service_name, _packet_sender| None)
-                    .run()
-                    .await;
+                ServiceRunner::new(conn, |service_name, packet_sender| {
+                    if service_name == b"ssh-userauth" {
+                        Some(Box::new(AuthService::new(
+                            |service_name, username, _packet_sender| {
+                                debug!(
+                                    "Authenticated {} for service {}",
+                                    String::from_utf8_lossy(username),
+                                    String::from_utf8_lossy(service_name)
+                                );
+                                Some(Box::new(NoopService))
+                            },
+                            packet_sender,
+                        )))
+                    } else {
+                        None
+                    }
+                })
+                .run()
+                .await;
             }
             Err(error) => {
                 warn!(%error, "failed to accept connection");
