@@ -155,6 +155,7 @@ impl<
                                     value: MessageType::Unknown(v),
                                     ..
                                 }) => {
+                                    let sequence_no = packet.sequence_number;
                                     let mut handled = false;
                                     for service in self.services.iter_mut() {
                                         if service.packet_types().contains(&v) {
@@ -164,10 +165,9 @@ impl<
                                         }
                                     }
                                     if !handled {
-                                        // FIXME: send proper packet sequence number
                                         if let Err(e) = self
                                             .connection
-                                            .send_packet(&UnimplementedMsg { sequence_no: 0 })
+                                            .send_packet(&UnimplementedMsg { sequence_no })
                                             .await
                                         {
                                             debug!("Error sending packet: {e}");
