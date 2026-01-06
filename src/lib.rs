@@ -6,6 +6,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, error, instrument, warn};
 
+pub mod auth;
 mod key_exchange;
 use key_exchange::{EcdhKeyExchangeInit, KeyExchange, KeyExchangeInit, NewKeys, RawKeySet};
 pub mod proto;

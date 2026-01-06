@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub trait Service {
-    fn packet_types(&self) -> &'static [u8];
+    fn packet_types(&self) -> Cow<'static, [u8]>;
     fn handle_packet(&mut self, packet: IncomingPacket<'_>);
 }
 
@@ -17,8 +17,8 @@ pub trait Service {
 pub struct NoopService;
 
 impl Service for NoopService {
-    fn packet_types(&self) -> &'static [u8] {
-        &[]
+    fn packet_types(&self) -> Cow<'static, [u8]> {
+        (&[]).into()
     }
 
     fn handle_packet(&mut self, _packet: IncomingPacket<'_>) {}
