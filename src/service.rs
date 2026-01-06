@@ -4,7 +4,7 @@ use tracing::debug;
 
 use crate::{
     proto::{Decode, Decoded, Encode, MessageType, Packet},
-    SshTransportConnection,
+    Error, SshTransportConnection,
 };
 
 pub trait Service {
@@ -129,7 +129,7 @@ impl<
 
     pub async fn run(mut self) {
         enum SelectResult<'a> {
-            Recv(anyhow::Result<Packet<'a>>),
+            Recv(Result<Packet<'a>, Error>),
             Send(Option<Box<dyn Encode>>),
         }
         loop {
@@ -250,8 +250,30 @@ impl<
                         }
                     }
                 }
+                SelectResult::Recv(Err(Error::Io(e))) => {
+                    debug!("Io error on connection, dropping: {e}");
+                    return;
+                }
+                SelectResult::Recv(Err(Error::InvalidMac)) => {
+                    debug!("Invalid mac on received packet, dropping connection");
+                    if let Err(e) = self
+                        .connection
+                        .send_packet(&DisconnectMsg(DisconnectReason::MacError))
+                        .await
+                    {
+                        debug!("Error sending packet: {e}");
+                    }
+                    return;
+                }
                 SelectResult::Recv(Err(e)) => {
                     debug!("Receiving packet failed with error {e}, dropping connection");
+                    if let Err(e) = self
+                        .connection
+                        .send_packet(&DisconnectMsg(DisconnectReason::ProtocolError))
+                        .await
+                    {
+                        debug!("Error sending packet: {e}");
+                    }
                     return;
                 }
                 SelectResult::Send(Some(payload)) => {
