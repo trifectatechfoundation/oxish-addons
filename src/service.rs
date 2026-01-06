@@ -131,7 +131,7 @@ impl<
 
     pub async fn run(mut self) {
         enum SelectResult<'a> {
-            Recv(anyhow::Result<IncomingPacket<'a>>),
+            Recv(Result<IncomingPacket<'a>, crate::Error>),
             Send(Option<Box<dyn Encode>>),
         }
         loop {

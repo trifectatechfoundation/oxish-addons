@@ -152,18 +152,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SshTransportConnection<T> {
         Ok(())
     }
 
-    pub(crate) async fn recv_packet(&mut self) -> anyhow::Result<IncomingPacket<'_>> {
-        Ok(self.read.packet(&mut self.stream).await?)
+    pub(crate) async fn recv_packet(&mut self) -> Result<IncomingPacket<'_>, Error> {
+        self.read.packet(&mut self.stream).await
     }
 
     pub(crate) async fn send_packet(
         &mut self,
         payload: &(impl Encode + ?Sized),
-    ) -> anyhow::Result<()> {
-        Ok(self
-            .write
+    ) -> Result<(), Error> {
+        self.write
             .write_packet(&mut self.stream, payload, None)
-            .await?)
+            .await
     }
 }
 
