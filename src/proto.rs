@@ -253,6 +253,7 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
 
             // Note: this needs to be done AFTER the IO to ensure
             // this async function is cancel-safe
+            let packet_number = self.packet_number;
             self.packet_number = self.packet_number.wrapping_add(1);
 
             let Decoded {
