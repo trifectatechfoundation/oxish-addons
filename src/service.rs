@@ -141,109 +141,46 @@ impl<
             };
 
             match select_result {
-                SelectResult::Recv(result) => {
-                    match result {
-                        Ok(packet) => {
-                            match MessageType::decode(packet.payload) {
-                                Ok(Decoded {
-                                    value: MessageType::Disconnect,
-                                    ..
-                                }) => {
+                SelectResult::Recv(Ok(packet)) => {
+                    match MessageType::decode(packet.payload) {
+                        Ok(Decoded {
+                            value: MessageType::Disconnect,
+                            ..
+                        }) => {
+                            return;
+                        }
+                        Ok(Decoded {
+                            value: MessageType::Unknown(v),
+                            ..
+                        }) => {
+                            let sequence_no = packet.sequence_number;
+                            let mut handled = false;
+                            if let Some(ref mut service) = self.service {
+                                // FIXME: make this a let chain once we move to Rust2024
+                                if service.packet_types().contains(&v) {
+                                    service.handle_packet(packet);
+                                    handled = true;
+                                }
+                            }
+                            if !handled {
+                                if let Err(e) = self
+                                    .connection
+                                    .send_packet(&UnimplementedMsg { sequence_no })
+                                    .await
+                                {
+                                    debug!("Error sending packet: {e}");
                                     return;
                                 }
-                                Ok(Decoded {
-                                    value: MessageType::Unknown(v),
-                                    ..
-                                }) => {
-                                    let sequence_no = packet.sequence_number;
-                                    let mut handled = false;
-                                    if let Some(ref mut service) = self.service {
-                                        // FIXME: make this a let chain once we move to Rust2024
-                                        if service.packet_types().contains(&v) {
-                                            service.handle_packet(packet);
-                                            handled = true;
-                                        }
-                                    }
-                                    if !handled {
-                                        if let Err(e) = self
-                                            .connection
-                                            .send_packet(&UnimplementedMsg { sequence_no })
-                                            .await
-                                        {
-                                            debug!("Error sending packet: {e}");
-                                            return;
-                                        }
-                                    }
-                                }
-                                Ok(Decoded {
-                                    value: MessageType::ServiceRequest,
-                                    next,
-                                }) => {
-                                    let service_name = match <&[u8]>::decode(next) {
-                                        Ok(Decoded { value, next: &[] }) => value,
-                                        Ok(_) => {
-                                            debug!("Excess bytes in packet, dropping connection");
-                                            if let Err(e) = self
-                                                .connection
-                                                .send_packet(&DisconnectMsg(
-                                                    DisconnectReason::ProtocolError,
-                                                ))
-                                                .await
-                                            {
-                                                debug!("Error sending packet: {e}");
-                                            }
-                                            return;
-                                        }
-                                        Err(_) => todo!(),
-                                    };
-
-                                    if let Some(service) = (self.service_provider)(
-                                        service_name,
-                                        self.outgoing_sender.clone(),
-                                    ) {
-                                        if self.service.is_none() {
-                                            self.service = Some(service);
-                                        } else {
-                                            if let Err(e) = self
-                                                .connection
-                                                .send_packet(&DisconnectMsg(
-                                                    DisconnectReason::ProtocolError,
-                                                ))
-                                                .await
-                                            {
-                                                debug!("Error sending packet: {e}");
-                                            }
-                                            return;
-                                        }
-                                        let packet = ServiceAcceptMsg {
-                                            name: service_name.to_vec().into(),
-                                        };
-                                        if let Err(e) = self.connection.send_packet(&packet).await {
-                                            debug!("Error sending packet: {e}");
-                                            return;
-                                        }
-                                    } else {
-                                        debug!(
-                                            "Request for unknown service {}",
-                                            String::from_utf8_lossy(service_name)
-                                        );
-                                        if let Err(e) = self
-                                            .connection
-                                            .send_packet(&DisconnectMsg(
-                                                DisconnectReason::ServiceNotAvailable,
-                                            ))
-                                            .await
-                                        {
-                                            debug!("Error sending packet: {e}");
-                                        }
-                                        return;
-                                    }
-                                }
+                            }
+                        }
+                        Ok(Decoded {
+                            value: MessageType::ServiceRequest,
+                            next,
+                        }) => {
+                            let service_name = match <&[u8]>::decode(next) {
+                                Ok(Decoded { value, next: &[] }) => value,
                                 Ok(_) => {
-                                    // FIXME: Figure out what to do with the other known message types instead of ignoring
-                                }
-                                Err(e) => {
-                                    debug!("Error decoding packet type: {e}");
+                                    debug!("Excess bytes in packet, dropping connection");
                                     if let Err(e) = self
                                         .connection
                                         .send_packet(&DisconnectMsg(
@@ -255,13 +192,69 @@ impl<
                                     }
                                     return;
                                 }
+                                Err(_) => todo!(),
+                            };
+
+                            if let Some(service) =
+                                (self.service_provider)(service_name, self.outgoing_sender.clone())
+                            {
+                                if self.service.is_none() {
+                                    self.service = Some(service);
+                                } else {
+                                    if let Err(e) = self
+                                        .connection
+                                        .send_packet(&DisconnectMsg(
+                                            DisconnectReason::ProtocolError,
+                                        ))
+                                        .await
+                                    {
+                                        debug!("Error sending packet: {e}");
+                                    }
+                                    return;
+                                }
+                                let packet = ServiceAcceptMsg {
+                                    name: service_name.to_vec().into(),
+                                };
+                                if let Err(e) = self.connection.send_packet(&packet).await {
+                                    debug!("Error sending packet: {e}");
+                                    return;
+                                }
+                            } else {
+                                debug!(
+                                    "Request for unknown service {}",
+                                    String::from_utf8_lossy(service_name)
+                                );
+                                if let Err(e) = self
+                                    .connection
+                                    .send_packet(&DisconnectMsg(
+                                        DisconnectReason::ServiceNotAvailable,
+                                    ))
+                                    .await
+                                {
+                                    debug!("Error sending packet: {e}");
+                                }
+                                return;
                             }
                         }
+                        Ok(_) => {
+                            // FIXME: Figure out what to do with the other known message types instead of ignoring
+                        }
                         Err(e) => {
-                            debug!("Receiving packet failed with error {e}, dropping connection");
+                            debug!("Error decoding packet type: {e}");
+                            if let Err(e) = self
+                                .connection
+                                .send_packet(&DisconnectMsg(DisconnectReason::ProtocolError))
+                                .await
+                            {
+                                debug!("Error sending packet: {e}");
+                            }
                             return;
                         }
                     }
+                }
+                SelectResult::Recv(Err(e)) => {
+                    debug!("Receiving packet failed with error {e}, dropping connection");
+                    return;
                 }
                 SelectResult::Send(Some(payload)) => {
                     if let Err(e) = self.connection.send_packet(&*payload).await {
