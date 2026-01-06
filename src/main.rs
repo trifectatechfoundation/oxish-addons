@@ -8,7 +8,7 @@ use std::{
 use aws_lc_rs::signature::Ed25519KeyPair;
 use clap::Parser;
 use listenfd::ListenFd;
-use oxish::Connection;
+use oxish::SshTransportConnection;
 use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
 
@@ -62,7 +62,9 @@ async fn main() -> anyhow::Result<()> {
                     warn!(%addr, %err, "failed to set TCP_NODELAY on connection");
                 }
                 // FIXME(aws/aws-lc-rs#975) use tokio::spawn() once StreamingDecryptingKey is Send
-                let Ok(conn) = Connection::connect(stream, addr, host_key.clone()).await else {
+                let Ok(conn) =
+                    SshTransportConnection::connect(stream, addr, host_key.clone()).await
+                else {
                     continue; // Some kind of error happened. Has been logged already.
                 };
                 conn.run().await;

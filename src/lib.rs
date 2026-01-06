@@ -15,15 +15,15 @@ use proto::{
 };
 pub mod service;
 
-/// A single SSH connection
-pub struct Connection<T> {
+/// A low level ssh transport layer protocol connection
+pub struct SshTransportConnection<T> {
     stream: T,
     context: ConnectionContext,
     read: ReadState,
     write: WriteState,
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
+impl<T: AsyncRead + AsyncWrite + Unpin> SshTransportConnection<T> {
     /// Create a new [`Connection`] and do the initial key exchange
     #[instrument(name = "connection", skip(stream))]
     pub async fn connect(
@@ -183,7 +183,7 @@ impl VersionExchange {
     async fn advance(
         &self,
         exchange: &mut HandshakeHash,
-        conn: &mut Connection<impl AsyncRead + AsyncWrite + Unpin>,
+        conn: &mut SshTransportConnection<impl AsyncRead + AsyncWrite + Unpin>,
     ) -> Result<KeyExchange, Error> {
         // TODO: enforce timeout if this is taking too long
         let (buf, Decoded { value: ident, next }) = loop {

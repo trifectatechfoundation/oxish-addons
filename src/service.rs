@@ -5,7 +5,7 @@ use tracing::debug;
 
 use crate::{
     proto::{Decode, Decoded, Encode, IncomingPacket, MessageType},
-    Connection,
+    SshTransportConnection,
 };
 
 pub trait Service {
@@ -17,7 +17,7 @@ pub struct ServiceRunner<F, T> {
     services: Vec<Box<dyn Service>>,
     outgoing_receiver: tokio::sync::mpsc::UnboundedReceiver<Box<dyn Encode>>,
     outgoing_sender: tokio::sync::mpsc::UnboundedSender<Box<dyn Encode>>,
-    connection: Connection<T>,
+    connection: SshTransportConnection<T>,
     service_provider: F,
 }
 
@@ -107,7 +107,7 @@ impl<
         T: AsyncRead + AsyncWrite + Unpin,
     > ServiceRunner<F, T>
 {
-    pub fn new(connection: Connection<T>, service_provider: F) -> Self {
+    pub fn new(connection: SshTransportConnection<T>, service_provider: F) -> Self {
         let (outgoing_sender, outgoing_receiver) = tokio::sync::mpsc::unbounded_channel();
         Self {
             services: vec![],
