@@ -1,4 +1,4 @@
-use crate::{pam::PamError, system::Hostname};
+use crate::system::Hostname;
 use std::{borrow::Cow, fmt, path::PathBuf};
 
 use super::{SudoPath, SudoString};
@@ -26,7 +26,6 @@ pub enum Error {
     EnvironmentVar(Vec<String>),
     Configuration(String),
     Options(String),
-    Pam(PamError),
     Io(Option<PathBuf>, std::io::Error),
     MaxAuthAttempts(u16),
     PathValidation(PathBuf),
@@ -94,7 +93,6 @@ impl fmt::Display for Error {
             }
             Error::Configuration(e) => write!(f, "{e}"),
             Error::Options(e) => write!(f, "{e}"),
-            Error::Pam(e) => write!(f, "{e}"),
             Error::Io(location, e) => {
                 if let Some(path) = location {
                     xlat_write!(
@@ -144,12 +142,6 @@ impl fmt::Display for Error {
                 )
             }
         }
-    }
-}
-
-impl From<PamError> for Error {
-    fn from(err: PamError) -> Self {
-        Error::Pam(err)
     }
 }
 

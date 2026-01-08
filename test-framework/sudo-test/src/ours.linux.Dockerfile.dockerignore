@@ -1,9 +1,0 @@
-# ignore everything
-*
-
-# but these
-!Cargo.lock
-!Cargo.toml
-!src/**/*
-!bin/**/*
-!build.rs

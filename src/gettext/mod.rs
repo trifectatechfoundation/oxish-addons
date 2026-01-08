@@ -128,24 +128,10 @@ macro_rules! xlat_write {
     };
 }
 
-#[cfg(feature = "gettext")]
-macro_rules! xlat_println {
-    ($fmt: literal $(, $id: ident = $val: expr)* $(,)?) => {
-        println_ignore_io_error!("{}", xlat!($fmt $(, $id = $val)*))
-    };
-}
-
 #[cfg(not(feature = "gettext"))]
 macro_rules! xlat_write {
     ($f: expr, $fmt: literal $(, $id: ident = $val: expr)* $(,)?) => {
         write!($f, $fmt $(, $id = $val)*)
-    };
-}
-
-#[cfg(not(feature = "gettext"))]
-macro_rules! xlat_println {
-    ($fmt: literal $(, $id: ident = $val: expr)* $(,)?) => {
-        println_ignore_io_error!($fmt $(, $id = $val)*)
     };
 }
 

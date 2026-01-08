@@ -1,5 +1,0 @@
----
-source: sudo-compliance-tests/src/sudo/cli.rs
-expression: stderr
----
-sudo: -u: command not found

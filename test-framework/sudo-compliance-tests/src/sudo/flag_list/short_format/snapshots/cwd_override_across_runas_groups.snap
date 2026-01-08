@@ -1,8 +1,0 @@
----
-source: sudo-compliance-tests/src/sudo/flag_list/short_format/mod.rs
-expression: stdout
----
-User ferruccio may run the following commands on container:
-    (root) NOPASSWD: /tmp
-    (root) CWD=* /usr/bin/true
-    (ferris) CWD=* /usr/bin/false, CWD=/home <BIN_LS>

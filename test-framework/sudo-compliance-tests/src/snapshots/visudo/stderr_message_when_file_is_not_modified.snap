@@ -1,5 +1,0 @@
----
-source: sudo-compliance-tests/src/visudo.rs
-expression: stderr
----
-visudo: /tmp/[mkdtemp]/sudoers unchanged

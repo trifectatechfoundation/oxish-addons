@@ -1,5 +1,0 @@
----
-source: sudo-compliance-tests/src/visudo/flag_file.rs
-expression: args
----
--- /tmp/[mkdtemp]/sudoers

@@ -1,17 +1,12 @@
 #![forbid(unsafe_code)]
 
-pub use command::CommandAndArguments;
-pub use context::Context;
 pub use error::Error;
 pub use path::SudoPath;
 pub use string::SudoString;
 
 pub mod bin_serde;
-pub mod command;
-pub mod context;
 pub mod error;
 mod path;
-pub mod resolve;
 mod string;
 
 // Hardened enum values used for critical enums to mitigate attacks like Rowhammer.

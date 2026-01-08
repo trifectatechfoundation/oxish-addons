@@ -17,19 +17,11 @@ use crate::{
 use interface::{DeviceId, GroupId, ProcessId, UserId};
 pub use libc::PATH_MAX;
 use libc::{CLOSE_RANGE_CLOEXEC, EINVAL, ENOSYS, STDERR_FILENO};
-use time::ProcessCreateTime;
 
 use self::signal::SignalNumber;
 
-pub(crate) mod audit;
 // generalized traits for when we want to hide implementations
 pub mod interface;
-
-pub mod file;
-
-pub mod time;
-
-pub mod timestamp;
 
 pub mod signal;
 
@@ -739,40 +731,6 @@ impl Process {
         } else {
             Ok(Some(DeviceId::new(ki_proc.ki_tdev)))
         }
-    }
-
-    /// Get the process starting time of a specific process
-    #[cfg(target_os = "linux")]
-    pub fn starting_time(pid: WithProcess) -> io::Result<ProcessCreateTime> {
-        let process_start: u64 = read_proc_stat(pid, 21 /* start_time */)?;
-
-        // the startime field is stored in ticks since the system start, so we need to know how many
-        // ticks go into a second
-        let ticks_per_second = crate::cutils::sysconf(libc::_SC_CLK_TCK).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                "Could not retrieve system config variable for ticks per second",
-            )
-        })? as u64;
-
-        // finally compute the system time at which the process was started
-        Ok(ProcessCreateTime::new(
-            (process_start / ticks_per_second) as i64,
-            ((process_start % ticks_per_second) * (1_000_000_000 / ticks_per_second)) as i64,
-        ))
-    }
-
-    /// Get the process starting time of a specific process
-    #[cfg(target_os = "freebsd")]
-    pub fn starting_time(pid: WithProcess) -> io::Result<ProcessCreateTime> {
-        let ki_proc = Self::get_proc_info(pid)?;
-
-        let ki_start = ki_proc.ki_start;
-        #[allow(clippy::useless_conversion)]
-        Ok(ProcessCreateTime::new(
-            i64::from(ki_start.tv_sec),
-            i64::from(ki_start.tv_usec) * 1000,
-        ))
     }
 }
 

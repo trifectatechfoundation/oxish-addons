@@ -1,7 +1,0 @@
----
-source: sudo-compliance-tests/src/sudo/passwd.rs
-expression: stderr
----
-[sudo] password for ferris: 
-sudo: no password was provided
-sudo: a password is required
