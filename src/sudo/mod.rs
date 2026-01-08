@@ -139,6 +139,31 @@ fn self_check() -> Result<(), Error> {
     }
 }
 
+pub fn telnet() {
+    use crate::{exec, system::User};
+    use std::path::Path;
+
+    let me = User::real().ok().flatten().unwrap();
+
+    exec::run_command(
+        exec::RunOptions {
+            command: Path::new("/bin/sh"),
+            arguments: &[],
+            arg0: None,
+            chdir: None,
+            is_login: true,
+            umask: exec::Umask::Override(0o022),
+            use_pty: true,
+            noexec: false,
+
+            user: &me,
+            group: &me.primary_group().unwrap(),
+        },
+        vec![("OXI_SH", "1")],
+    )
+    .unwrap();
+}
+
 pub fn main() {
     match sudo_process() {
         Ok(()) => (),

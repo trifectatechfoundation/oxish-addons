@@ -12,7 +12,7 @@ exclude = ["audit", "proofs", "util"]
 
 rust-version = "1.70"
 
-default-run = "sudo"
+default-run = "telnetd"
 
 [dependencies]
 libc = "0.2.176"
