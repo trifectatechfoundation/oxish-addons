@@ -473,6 +473,21 @@ pub struct IncomingPacket<'a> {
     pub(crate) payload: &'a [u8],
 }
 
+pub struct OwnedPacket {
+    #[expect(unused)]
+    pub(crate) sequence_number: u32,
+    pub(crate) payload: Vec<u8>,
+}
+
+impl IncomingPacket<'_> {
+    pub(crate) fn to_owned(&self) -> OwnedPacket {
+        OwnedPacket {
+            sequence_number: self.sequence_number,
+            payload: self.payload.to_owned(),
+        }
+    }
+}
+
 /// An encoded outgoing packet including length field and padding, but
 /// excluding encryption and MAC
 #[must_use]

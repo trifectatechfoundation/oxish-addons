@@ -9,11 +9,13 @@ use aws_lc_rs::signature::Ed25519KeyPair;
 use clap::Parser;
 use listenfd::ListenFd;
 use oxish::{
-    auth::AuthService,
-    service::{NoopService, ServiceRunner},
+    auth::AuthService, connection::ConnectionService, service::ServiceRunner,
     SshTransportConnection,
 };
-use tokio::net::TcpListener;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
 use tracing::{debug, info, warn};
 
 #[tokio::main]
@@ -74,13 +76,52 @@ async fn main() -> anyhow::Result<()> {
                 ServiceRunner::new(conn, |service_name, packet_sender| {
                     if service_name == b"ssh-userauth" {
                         Some(Box::new(AuthService::new(
-                            |service_name, username, _packet_sender| {
+                            |service_name, username, packet_sender| {
                                 debug!(
                                     "Authenticated {} for service {}",
                                     String::from_utf8_lossy(username),
                                     String::from_utf8_lossy(service_name)
                                 );
-                                Some(Box::new(NoopService))
+                                Some(Box::new(ConnectionService::new(
+                                    |channel_type, _type_data, mut channels| {
+                                        debug!(
+                                            "New channel of type {}",
+                                            String::from_utf8_lossy(channel_type)
+                                        );
+                                        tokio::spawn(async move {
+                                            let _ =
+                                                channels.stdout.write_all(b"hello world\r\n").await;
+                                            loop {
+                                                let mut buf = [0; 128];
+                                                let Ok(size) = channels.stdin.read(&mut buf).await
+                                                else {
+                                                    break;
+                                                };
+                                                if size == 0 {
+                                                    break;
+                                                }
+                                                for c in &buf[..size] {
+                                                    match *c {
+                                                        b'\r' => {
+                                                            let _ = channels
+                                                                .stdout
+                                                                .write_all(b"\r\n")
+                                                                .await;
+                                                        }
+                                                        v => {
+                                                            let _ = channels
+                                                                .stdout
+                                                                .write_all(&[v])
+                                                                .await;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        });
+                                        true
+                                    },
+                                    packet_sender,
+                                )))
                             },
                             packet_sender,
                         )))

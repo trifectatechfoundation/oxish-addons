@@ -50,7 +50,7 @@ impl From<u8> for UserAuthMessageType {
 
 pub struct AuthService<F> {
     inner: Option<Box<dyn Service>>,
-    packet_sender: tokio::sync::mpsc::UnboundedSender<Box<dyn Encode>>,
+    packet_sender: tokio::sync::mpsc::UnboundedSender<Box<dyn Encode + Send + 'static>>,
     service_provider: F,
 }
 
@@ -58,13 +58,13 @@ impl<
         F: FnMut(
             &[u8],
             &[u8],
-            tokio::sync::mpsc::UnboundedSender<Box<dyn Encode>>,
+            tokio::sync::mpsc::UnboundedSender<Box<dyn Encode + Send + 'static>>,
         ) -> Option<Box<dyn Service>>,
     > AuthService<F>
 {
     pub fn new(
         service_provider: F,
-        packet_sender: tokio::sync::mpsc::UnboundedSender<Box<dyn Encode>>,
+        packet_sender: tokio::sync::mpsc::UnboundedSender<Box<dyn Encode + Send + 'static>>,
     ) -> Self {
         Self {
             inner: None,
@@ -96,7 +96,7 @@ impl<
         F: FnMut(
             &[u8],
             &[u8],
-            tokio::sync::mpsc::UnboundedSender<Box<dyn Encode>>,
+            tokio::sync::mpsc::UnboundedSender<Box<dyn Encode + Send + 'static>>,
         ) -> Option<Box<dyn Service>>,
     > Service for AuthService<F>
 {

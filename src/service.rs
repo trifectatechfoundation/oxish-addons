@@ -26,8 +26,8 @@ impl Service for NoopService {
 
 pub struct ServiceRunner<F, T> {
     service: Option<Box<dyn Service>>,
-    outgoing_receiver: tokio::sync::mpsc::UnboundedReceiver<Box<dyn Encode>>,
-    outgoing_sender: tokio::sync::mpsc::UnboundedSender<Box<dyn Encode>>,
+    outgoing_receiver: tokio::sync::mpsc::UnboundedReceiver<Box<dyn Encode + Send + 'static>>,
+    outgoing_sender: tokio::sync::mpsc::UnboundedSender<Box<dyn Encode + Send + 'static>>,
     connection: SshTransportConnection<T>,
     service_provider: F,
 }
@@ -113,7 +113,7 @@ impl Encode for UnimplementedMsg {
 impl<
         F: FnMut(
             &[u8],
-            tokio::sync::mpsc::UnboundedSender<Box<dyn Encode>>,
+            tokio::sync::mpsc::UnboundedSender<Box<dyn Encode + Send + 'static>>,
         ) -> Option<Box<dyn Service>>,
         T: AsyncRead + AsyncWrite + Unpin,
     > ServiceRunner<F, T>
@@ -132,7 +132,7 @@ impl<
     pub async fn run(mut self) {
         enum SelectResult<'a> {
             Recv(Result<IncomingPacket<'a>, Error>),
-            Send(Option<Box<dyn Encode>>),
+            Send(Option<Box<dyn Encode + Send + 'static>>),
         }
         loop {
             let select_result = tokio::select! {
