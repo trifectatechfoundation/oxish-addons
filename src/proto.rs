@@ -358,12 +358,25 @@ pub struct Packet<'a> {
     pub(crate) payload: &'a [u8],
 }
 
+pub struct OwnedPacket {
+    #[expect(unused)]
+    pub(crate) number: u32,
+    pub(crate) payload: Vec<u8>,
+}
+
 impl<'a> Packet<'a> {
     pub(crate) fn builder(buf: &'a mut Vec<u8>) -> PacketBuilder<'a> {
         let start = buf.len();
         buf.extend_from_slice(&[0, 0, 0, 0]); // packet_length
         buf.push(0); // padding_length
         PacketBuilder { buf, start }
+    }
+
+    pub(crate) fn to_owned(&self) -> OwnedPacket {
+        OwnedPacket {
+            number: self.number,
+            payload: self.payload.to_owned(),
+        }
     }
 }
 
