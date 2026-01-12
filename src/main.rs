@@ -99,6 +99,11 @@ async fn main() -> anyhow::Result<()> {
                                                 }
                                                 for c in &buf[..size] {
                                                     match *c {
+                                                        3 => {
+                                                            // ctrl-c
+                                                            channels.exit_status.send(2).unwrap();
+                                                            return;
+                                                        }
                                                         b'\r' => {
                                                             let _ = channels
                                                                 .stdout

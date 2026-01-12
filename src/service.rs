@@ -161,6 +161,7 @@ impl<
                                 }
                             }
                             if !handled {
+                                debug!("Received unhandled packet of type {v}");
                                 if let Err(e) = self
                                     .connection
                                     .send_packet(&UnimplementedMsg { sequence_no })
