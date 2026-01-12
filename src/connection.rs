@@ -1,6 +1,7 @@
 use core::pin::Pin;
 use std::collections::HashMap;
 
+use futures::FutureExt;
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, SimplexStream},
     select,
@@ -14,6 +15,7 @@ use crate::{
 
 const BUFFER_SIZE: u32 = 1024;
 
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum ConnectionMessageType {
     GlobalRequest,
     RequestSuccess,
@@ -155,6 +157,32 @@ impl Encode for ChannelExtendedDataStderr {
     }
 }
 
+struct ChannelClose {
+    remote_id: u32,
+}
+
+impl Encode for ChannelClose {
+    fn encode(&self, buf: &mut Vec<u8>) {
+        ConnectionMessageType::ChannelClose.encode(buf);
+        self.remote_id.encode(buf);
+    }
+}
+
+struct ChannelRequestExitStatus {
+    remote_id: u32,
+    exit_status: u32,
+}
+
+impl Encode for ChannelRequestExitStatus {
+    fn encode(&self, buf: &mut Vec<u8>) {
+        ConnectionMessageType::ChannelRequest.encode(buf);
+        self.remote_id.encode(buf);
+        b"exit-status".encode(buf);
+        false.encode(buf);
+        self.exit_status.encode(buf);
+    }
+}
+
 struct ChannelSuccess(u32);
 
 impl Encode for ChannelSuccess {
@@ -174,6 +202,7 @@ impl Encode for ChannelFailure {
 }
 
 pub struct ChannelStreams {
+    pub exit_status: tokio::sync::oneshot::Sender<u32>,
     pub stdin: tokio::io::ReadHalf<SimplexStream>,
     pub stdout: tokio::io::WriteHalf<SimplexStream>,
     pub stderr: tokio::io::WriteHalf<SimplexStream>,
@@ -181,6 +210,7 @@ pub struct ChannelStreams {
 
 pub struct ChannelInternalData {
     remote_id: u32,
+    exit_status: tokio::sync::oneshot::Receiver<u32>,
     stdin: tokio::io::WriteHalf<SimplexStream>,
     pending_in: Option<u32>,
     stdout: tokio::io::ReadHalf<SimplexStream>,
@@ -205,7 +235,7 @@ pub struct ConnectionService {
 
 impl Service for ConnectionService {
     fn packet_types(&self) -> std::borrow::Cow<'static, [u8]> {
-        (&[90, 93, 94]).into()
+        (&[90, 93, 94, 97]).into()
     }
 
     fn handle_packet(&mut self, packet: IncomingPacket<'_>) {
@@ -232,6 +262,27 @@ impl ConnectionService {
                     let mut buf = [0u8; BUFFER_SIZE as usize];
                     let mut read_buf = ReadBuf::new(&mut buf);
                     for (_, channel) in channels.iter_mut() {
+                        if let core::task::Poll::Ready(exit_status) =
+                            channel.exit_status.poll_unpin(context)
+                        {
+                            match exit_status {
+                                Ok(exit_status) => {
+                                    dbg!(exit_status);
+                                    let _ =
+                                        packet_sender.send(Box::new(ChannelRequestExitStatus {
+                                            remote_id: channel.remote_id,
+                                            exit_status,
+                                        }));
+                                }
+                                Err(_) => {
+                                    dbg!("closed");
+                                }
+                            }
+                            let _ = packet_sender.send(Box::new(ChannelClose {
+                                remote_id: channel.remote_id,
+                            }));
+                        }
+
                         if let Some(pending_in) = channel.pending_in {
                             if matches!(
                                 Pin::new(&mut channel.stdin).poll_flush(context),
@@ -332,6 +383,8 @@ impl ConnectionService {
                                     continue;
                                 };
 
+                                let (exit_status_sender, exit_status) =
+                                    tokio::sync::oneshot::channel();
                                 let (stdin, stdin_sender) =
                                     tokio::io::simplex(BUFFER_SIZE.try_into().unwrap());
                                 let (stdout_receiver, stdout) =
@@ -343,6 +396,7 @@ impl ConnectionService {
                                     channel_type,
                                     type_specific_data,
                                     ChannelStreams {
+                                        exit_status: exit_status_sender,
                                         stdin,
                                         stdout,
                                         stderr,
@@ -360,6 +414,7 @@ impl ConnectionService {
                                         channel_id,
                                         ChannelInternalData {
                                             remote_id,
+                                            exit_status,
                                             stdin: stdin_sender,
                                             pending_in: None,
                                             stdout: stdout_receiver,
@@ -460,6 +515,22 @@ impl ConnectionService {
                                         }
                                         _ => {}
                                     }
+                                }
+                            }
+                            ConnectionMessageType::ChannelClose => {
+                                let Ok(Decoded {
+                                    value: channel_id,
+                                    next: _,
+                                }) = u32::decode(next)
+                                else {
+                                    continue;
+                                };
+
+                                if let Some(channel) = channels.remove(&channel_id) {
+                                    // FIXME only send if we didn't initiate the close
+                                    let _ = packet_sender.send(Box::new(ChannelClose {
+                                        remote_id: channel.remote_id,
+                                    }));
                                 }
                             }
                             _ => {}
