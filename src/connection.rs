@@ -208,13 +208,20 @@ pub struct ChannelStreams {
     pub stderr: tokio::io::WriteHalf<SimplexStream>,
 }
 
-pub struct ChannelInternalData {
+enum ChannelInternalState {
+    Open {
+        exit_status: tokio::sync::oneshot::Receiver<u32>,
+        stdin: tokio::io::WriteHalf<SimplexStream>,
+        stdout: tokio::io::ReadHalf<SimplexStream>,
+        stderr: tokio::io::ReadHalf<SimplexStream>,
+    },
+    ServerClosed,
+}
+
+struct ChannelInternalData {
     remote_id: u32,
-    exit_status: tokio::sync::oneshot::Receiver<u32>,
-    stdin: tokio::io::WriteHalf<SimplexStream>,
+    state: ChannelInternalState,
     pending_in: Option<u32>,
-    stdout: tokio::io::ReadHalf<SimplexStream>,
-    stderr: tokio::io::ReadHalf<SimplexStream>,
     allowed_out: u32,
     max_packet_size: u32,
 }
@@ -262,30 +269,36 @@ impl ConnectionService {
                     let mut buf = [0u8; BUFFER_SIZE as usize];
                     let mut read_buf = ReadBuf::new(&mut buf);
                     for (_, channel) in channels.iter_mut() {
+                        let (exit_status, mut stdin, mut stdout, mut stderr) =
+                            match &mut channel.state {
+                                ChannelInternalState::Open {
+                                    exit_status,
+                                    stdin,
+                                    stdout,
+                                    stderr,
+                                } => (exit_status, stdin, stdout, stderr),
+                                ChannelInternalState::ServerClosed => continue,
+                            };
+
                         if let core::task::Poll::Ready(exit_status) =
-                            channel.exit_status.poll_unpin(context)
+                            exit_status.poll_unpin(context)
                         {
-                            match exit_status {
-                                Ok(exit_status) => {
-                                    dbg!(exit_status);
-                                    let _ =
-                                        packet_sender.send(Box::new(ChannelRequestExitStatus {
-                                            remote_id: channel.remote_id,
-                                            exit_status,
-                                        }));
-                                }
-                                Err(_) => {
-                                    dbg!("closed");
-                                }
+                            if let Ok(exit_status) = exit_status {
+                                let _ = packet_sender.send(Box::new(ChannelRequestExitStatus {
+                                    remote_id: channel.remote_id,
+                                    exit_status,
+                                }));
                             }
                             let _ = packet_sender.send(Box::new(ChannelClose {
                                 remote_id: channel.remote_id,
                             }));
+                            channel.state = ChannelInternalState::ServerClosed;
+                            continue;
                         }
 
                         if let Some(pending_in) = channel.pending_in {
                             if matches!(
-                                Pin::new(&mut channel.stdin).poll_flush(context),
+                                Pin::new(&mut stdin).poll_flush(context),
                                 core::task::Poll::Ready(_)
                             ) {
                                 let _ = packet_sender.send(Box::new(ChannelWindowAdjust {
@@ -301,7 +314,7 @@ impl ConnectionService {
                         read_buf.clear();
                         if acceptable_out > 0
                             && matches!(
-                                Pin::new(&mut channel.stderr).poll_read(context, &mut read_buf),
+                                Pin::new(&mut stderr).poll_read(context, &mut read_buf),
                                 core::task::Poll::Ready(_)
                             )
                         {
@@ -320,7 +333,7 @@ impl ConnectionService {
                         read_buf.clear();
                         if acceptable_out > 0
                             && matches!(
-                                Pin::new(&mut channel.stdout).poll_read(context, &mut read_buf),
+                                Pin::new(&mut stdout).poll_read(context, &mut read_buf),
                                 core::task::Poll::Ready(_)
                             )
                         {
@@ -414,13 +427,15 @@ impl ConnectionService {
                                         channel_id,
                                         ChannelInternalData {
                                             remote_id,
-                                            exit_status,
-                                            stdin: stdin_sender,
                                             pending_in: None,
-                                            stdout: stdout_receiver,
-                                            stderr: stderr_receiver,
                                             allowed_out: initial_window_size,
                                             max_packet_size,
+                                            state: ChannelInternalState::Open {
+                                                exit_status,
+                                                stdin: stdin_sender,
+                                                stdout: stdout_receiver,
+                                                stderr: stderr_receiver,
+                                            },
                                         },
                                     );
 
@@ -469,15 +484,21 @@ impl ConnectionService {
                                 };
 
                                 if let Some(channel) = channels.get_mut(&channel_id) {
-                                    let _ = channel.stdin.write_all(data).await;
-                                    if let Some(pending_in) = &mut channel.pending_in {
-                                        *pending_in = BUFFER_SIZE.min(
-                                            pending_in
-                                                .saturating_add(data.len().try_into().unwrap()),
-                                        )
-                                    } else {
-                                        channel.pending_in =
-                                            Some(BUFFER_SIZE.min(data.len().try_into().unwrap()));
+                                    match &mut channel.state {
+                                        ChannelInternalState::Open { stdin, .. } => {
+                                            let _ = stdin.write_all(data).await;
+                                            if let Some(pending_in) = &mut channel.pending_in {
+                                                *pending_in =
+                                                    BUFFER_SIZE.min(pending_in.saturating_add(
+                                                        data.len().try_into().unwrap(),
+                                                    ))
+                                            } else {
+                                                channel.pending_in = Some(
+                                                    BUFFER_SIZE.min(data.len().try_into().unwrap()),
+                                                );
+                                            }
+                                        }
+                                        ChannelInternalState::ServerClosed => {}
                                     }
                                 }
                             }
@@ -527,10 +548,14 @@ impl ConnectionService {
                                 };
 
                                 if let Some(channel) = channels.remove(&channel_id) {
-                                    // FIXME only send if we didn't initiate the close
-                                    let _ = packet_sender.send(Box::new(ChannelClose {
-                                        remote_id: channel.remote_id,
-                                    }));
+                                    match channel.state {
+                                        ChannelInternalState::Open { .. } => {
+                                            let _ = packet_sender.send(Box::new(ChannelClose {
+                                                remote_id: channel.remote_id,
+                                            }));
+                                        }
+                                        ChannelInternalState::ServerClosed => {}
+                                    }
                                 }
                             }
                             _ => {}
