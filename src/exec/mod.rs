@@ -6,31 +6,16 @@ mod noexec;
 mod use_pty;
 
 use std::{
-    borrow::Cow,
-    env,
-    ffi::{c_int, OsStr},
-    io,
-    os::unix::ffi::OsStrExt,
-    os::unix::process::CommandExt,
-    path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
+    borrow::Cow, env, ffi::{OsStr, c_int}, io::{self, Read, Write}, os::{fd::AsFd, unix::{ffi::OsStrExt, net::UnixStream, process::CommandExt}}, path::{Path, PathBuf}, process::Command, sync::Mutex, time::Duration
 };
 
 use crate::{
     common::{
-        bin_serde::BinPipe, HARDENED_ENUM_VALUE_0, HARDENED_ENUM_VALUE_1, HARDENED_ENUM_VALUE_2,
+        HARDENED_ENUM_VALUE_0, HARDENED_ENUM_VALUE_1, HARDENED_ENUM_VALUE_2, bin_serde::BinPipe
     },
-    exec::no_pty::exec_no_pty,
     log::{dev_info, dev_warn, user_error},
     system::{
-        _exit,
-        interface::ProcessId,
-        kill, killpg, mark_fds_as_cloexec, set_target_user,
-        signal::{consts::*, signal_name, SignalNumber, SignalSet},
-        term::UserTerm,
-        wait::{Wait, WaitError, WaitOptions},
-        Group, User,
+        _exit, Group, User, interface::ProcessId, kill, killpg, mark_fds_as_cloexec, set_target_user, signal::{SignalNumber, SignalSet, consts::*, signal_name}, term::{TermSize, Terminal, UserTerm}, wait::{Wait, WaitError, WaitOptions}
     },
 };
 
@@ -82,6 +67,7 @@ pub struct RunOptions<'a> {
 pub fn run_command(
     options: RunOptions<'_>,
     env: impl IntoIterator<Item = (impl AsRef<OsStr>, impl AsRef<OsStr>)>,
+    sock: UnixStream,
 ) -> io::Result<ExitReason> {
     // FIXME: should we pipe the stdio streams?
     let qualified_path = options.command;
@@ -177,23 +163,15 @@ pub fn run_command(
 
     let sudo_pid = ProcessId::new(std::process::id() as i32);
 
-    if options.use_pty {
-        match UserTerm::open() {
-            Ok(user_tty) => exec_pty(
-                sudo_pid,
-                spawn_noexec_handler,
-                command,
-                user_tty,
-                options.user,
-            ),
-            Err(err) => {
-                dev_info!("Could not open user's terminal, not allocating a pty: {err}");
-                exec_no_pty(sudo_pid, spawn_noexec_handler, command)
-            }
-        }
-    } else {
-        exec_no_pty(sudo_pid, spawn_noexec_handler, command)
-    }
+    let user_tty = UserTerm::open().unwrap();
+
+    exec_pty(
+        sudo_pid,
+        spawn_noexec_handler,
+        command,
+        user_tty,
+        options.user,
+    )
 }
 
 /// Exit reason for the command executed by sudo.
