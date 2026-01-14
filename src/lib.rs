@@ -1,20 +1,18 @@
 use core::net::SocketAddr;
 use std::{io, str, sync::Arc};
 
-use aws_lc_rs::signature::Ed25519KeyPair;
+use aws_lc_rs::{
+    aead::chacha20_poly1305_openssh::{OpeningKey, SealingKey},
+    signature::Ed25519KeyPair,
+};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, error, instrument, warn};
 
 mod key_exchange;
-use key_exchange::KeyExchange;
+use key_exchange::{EcdhKeyExchangeInit, KeyExchange, KeyExchangeInit, NewKeys, RawKeySet};
 mod proto;
-use proto::{AesCtrWriteKeys, Completion, Decoded, MessageType, ReadState, WriteState};
-
-use crate::{
-    key_exchange::{EcdhKeyExchangeInit, KeyExchangeInit, NewKeys, RawKeySet},
-    proto::{AesCtrReadKeys, Encode, HandshakeHash},
-};
+use proto::{Completion, Decoded, Encode, HandshakeHash, MessageType, ReadState, WriteState};
 
 /// A single SSH connection
 pub struct Connection<T> {
@@ -146,8 +144,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
         // Cipher and MAC algorithms are negotiated during key exchange.
         // Currently this hard codes AES-128-CTR and HMAC-SHA256.
-        self.read.decryption_key = Some(AesCtrReadKeys::new(client_to_server));
-        self.write.keys = Some(AesCtrWriteKeys::new(server_to_client));
+        self.read.opening_key = Some(OpeningKey::new(&client_to_server.encryption_key.derive()));
+        self.write.sealing_key = Some(SealingKey::new(&server_to_client.encryption_key.derive()));
         Ok(())
     }
 }
