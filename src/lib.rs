@@ -1,19 +1,20 @@
 use core::net::SocketAddr;
 use std::{io, str, sync::Arc};
 
-use aws_lc_rs::signature::Ed25519KeyPair;
+use aws_lc_rs::{
+    aead::{self, BoundKey, OpeningKey, UnboundKey},
+    signature::Ed25519KeyPair,
+};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, error, instrument, warn};
 
 mod key_exchange;
-use key_exchange::KeyExchange;
+use key_exchange::{EcdhKeyExchangeInit, KeyExchange, KeyExchangeInit, NewKeys, RawKeySet};
 mod proto;
-use proto::{AesCtrWriteKeys, Completion, Decoded, MessageType, ReadState, WriteState};
-
-use crate::{
-    key_exchange::{EcdhKeyExchangeInit, KeyExchangeInit, NewKeys, RawKeySet},
-    proto::{AesCtrReadKeys, Encode, HandshakeHash},
+use proto::{
+    AesCtrWriteKeys, AesGcmNonce, Completion, Decoded, Encode, HandshakeHash, MessageType,
+    ReadState, WriteState,
 };
 
 /// A single SSH connection
@@ -145,8 +146,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         } = keys;
 
         // Cipher and MAC algorithms are negotiated during key exchange.
-        // Currently this hard codes AES-128-CTR and HMAC-SHA256.
-        self.read.decryption_key = Some(AesCtrReadKeys::new(client_to_server));
+        self.read.opening_key = Some(OpeningKey::new(
+            UnboundKey::new(
+                &aead::AES_128_GCM,
+                &client_to_server.encryption_key.derive::<16>(),
+            )
+            .unwrap(),
+            AesGcmNonce::from_iv(client_to_server.initial_iv.derive()),
+        ));
         self.write.keys = Some(AesCtrWriteKeys::new(server_to_client));
         Ok(())
     }

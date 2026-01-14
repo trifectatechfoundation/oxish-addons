@@ -285,10 +285,16 @@ impl KeyExchangeInit<'static> {
             cookie,
             key_exchange_algorithms: vec![KeyExchangeAlgorithm::Curve25519Sha256],
             server_host_key_algorithms: vec![PublicKeyAlgorithm::Ed25519],
-            encryption_algorithms_client_to_server: vec![EncryptionAlgorithm::Aes128Ctr],
-            encryption_algorithms_server_to_client: vec![EncryptionAlgorithm::Aes128Ctr],
-            mac_algorithms_client_to_server: vec![MacAlgorithm::HmacSha2256],
-            mac_algorithms_server_to_client: vec![MacAlgorithm::HmacSha2256],
+            encryption_algorithms_client_to_server: vec![
+                EncryptionAlgorithm::AeadAes128Gcm,
+                EncryptionAlgorithm::Aes128GcmOpenSsh,
+            ],
+            encryption_algorithms_server_to_client: vec![
+                EncryptionAlgorithm::AeadAes128Gcm,
+                EncryptionAlgorithm::Aes128GcmOpenSsh,
+            ],
+            mac_algorithms_client_to_server: vec![MacAlgorithm::AeadAes128Gcm],
+            mac_algorithms_server_to_client: vec![MacAlgorithm::AeadAes128Gcm],
             compression_algorithms_client_to_server: vec![CompressionAlgorithm::None],
             compression_algorithms_server_to_client: vec![CompressionAlgorithm::None],
             languages_client_to_server: vec![],
@@ -666,15 +672,18 @@ impl<'a> From<&'a str> for PublicKeyAlgorithm<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EncryptionAlgorithm<'a> {
-    /// aes128-ctr (<https://www.rfc-editor.org/rfc/rfc4344#section-4>)
-    Aes128Ctr,
+    /// AEAD_AES_128_GCM (<https://www.rfc-editor.org/rfc/rfc5647.html>)
+    AeadAes128Gcm,
+    /// aes128-gcm@openssh.com <https://datatracker.ietf.org/doc/draft-miller-sshm-aes-gcm/>
+    Aes128GcmOpenSsh,
     Unknown(&'a str),
 }
 
 impl Encode for EncryptionAlgorithm<'_> {
     fn encode(&self, buf: &mut Vec<u8>) {
         match self {
-            Self::Aes128Ctr => buf.extend_from_slice(b"aes128-ctr"),
+            Self::AeadAes128Gcm => buf.extend_from_slice(b"AEAD_AES_128_GCM"),
+            Self::Aes128GcmOpenSsh => buf.extend_from_slice(b"aes128-gcm@openssh.com"),
             Self::Unknown(name) => buf.extend_from_slice(name.as_bytes()),
         }
     }
@@ -683,7 +692,8 @@ impl Encode for EncryptionAlgorithm<'_> {
 impl<'a> From<&'a str> for EncryptionAlgorithm<'a> {
     fn from(value: &'a str) -> Self {
         match value {
-            "aes128-ctr" => Self::Aes128Ctr,
+            "AEAD_AES_128_GCM" => Self::AeadAes128Gcm,
+            "aes128-gcm@openssh.com" => Self::Aes128GcmOpenSsh,
             _ => Self::Unknown(value),
         }
     }
@@ -691,15 +701,15 @@ impl<'a> From<&'a str> for EncryptionAlgorithm<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MacAlgorithm<'a> {
-    /// hmac-sha2-256 (<https://www.rfc-editor.org/rfc/rfc6668#section-2>)
-    HmacSha2256,
+    /// hmac-sha2-256 (<https://www.rfc-editor.org/rfc/rfc5647.html>)
+    AeadAes128Gcm,
     Unknown(&'a str),
 }
 
 impl Encode for MacAlgorithm<'_> {
     fn encode(&self, buf: &mut Vec<u8>) {
         match self {
-            Self::HmacSha2256 => buf.extend_from_slice(b"hmac-sha2-256"),
+            Self::AeadAes128Gcm => buf.extend_from_slice(b"AEAD_AES_128_GCM"),
             Self::Unknown(name) => buf.extend_from_slice(name.as_bytes()),
         }
     }
@@ -708,7 +718,7 @@ impl Encode for MacAlgorithm<'_> {
 impl<'a> From<&'a str> for MacAlgorithm<'a> {
     fn from(value: &'a str) -> Self {
         match value {
-            "hmac-sha2-256" => Self::HmacSha2256,
+            "AEAD_AES_128_GCM" => Self::AeadAes128Gcm,
             _ => Self::Unknown(value),
         }
     }

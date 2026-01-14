@@ -5,13 +5,41 @@ use core::task::{ready, Context, Poll};
 use std::io;
 
 use aws_lc_rs::{
-    cipher::{self, StreamingDecryptingKey, StreamingEncryptingKey, UnboundCipherKey},
-    constant_time, digest, hmac, rand,
+    aead::{Aad, BoundKey, Nonce, NonceSequence, OpeningKey},
+    cipher::{self, StreamingEncryptingKey, UnboundCipherKey},
+    digest,
+    error::Unspecified,
+    hmac, rand,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tracing::debug;
 
 use crate::{key_exchange::RawKeys, Error};
+
+pub(crate) struct AesGcmNonce {
+    fixed: u32,
+    invocation_counter: u64,
+}
+
+impl AesGcmNonce {
+    pub(crate) fn from_iv(iv: [u8; 12]) -> Self {
+        Self {
+            fixed: u32::from_be_bytes(iv[..4].try_into().unwrap()),
+            invocation_counter: u64::from_be_bytes(iv[4..].try_into().unwrap()),
+        }
+    }
+}
+
+impl NonceSequence for AesGcmNonce {
+    fn advance(&mut self) -> Result<Nonce, Unspecified> {
+        let counter = self.invocation_counter;
+        self.invocation_counter = self.invocation_counter.checked_add(1).ok_or(Unspecified)?;
+        let mut nonce = [0; 12];
+        nonce[..4].copy_from_slice(&self.fixed.to_be_bytes());
+        nonce[4..].copy_from_slice(&counter.to_be_bytes());
+        Ok(Nonce::assume_unique_for_key(nonce))
+    }
+}
 
 /// The reader and decryption state for an SSH connection
 pub(crate) struct ReadState {
@@ -23,15 +51,8 @@ pub(crate) struct ReadState {
     /// the start of each call to `poll_packet()`.
     last_length: usize,
 
-    /// Buffer with blocks of decrypted data
-    ///
-    /// aws-lc-rs does not support in-place decryption for AES-CTR.
-    decrypted_buf: Vec<u8>,
-    /// Whether the a first block including the packet length has been decrypted
-    decrypted_first_block: bool,
-
     sequence_number: u32,
-    pub(crate) decryption_key: Option<AesCtrReadKeys>,
+    pub(crate) opening_key: Option<OpeningKey<AesGcmNonce>>,
 }
 
 impl ReadState {
@@ -57,69 +78,35 @@ impl ReadState {
             self.buf.copy_within(self.last_length.., 0);
             self.buf.truncate(self.buf.len() - self.last_length);
             self.last_length = 0;
-            self.decrypted_buf.clear();
-            self.decrypted_first_block = false;
         }
 
-        let (packet_length, mac_len) = if let Some(keys) = &mut self.decryption_key {
-            let block_len = keys.decryption.algorithm().block_len();
-
-            let needed = block_len;
+        let (packet_length, mac_len) = if let Some(opening_key) = &mut self.opening_key {
+            let needed = 4;
             if self.buf.len() < needed {
                 return Ok(Completion::Incomplete(Some(needed)));
-            }
-            self.decrypted_buf.resize(self.buf.len() + block_len, 0);
-
-            if !self.decrypted_first_block {
-                // It is fine to use less_safe_update as we make sure to decrypt whole blocks at a time
-                let update = keys
-                    .decryption
-                    .less_safe_update(&self.buf[..block_len], &mut self.decrypted_buf[..block_len])
-                    .unwrap();
-                assert_eq!(update.remainder().len(), 0);
-                self.decrypted_first_block = true;
             }
 
             let Decoded {
                 value: packet_length,
                 next,
-            } = PacketLength::decode(&self.decrypted_buf[..4])?;
+            } = PacketLength::decode(&self.buf[..4])?;
             assert!(next.is_empty());
 
-            let needed = 4
-                + packet_length.inner as usize
-                + keys.mac.algorithm().digest_algorithm().output_len;
+            let needed = 4 + packet_length.inner as usize + opening_key.algorithm().tag_len();
             if self.buf.len() < needed {
                 return Ok(Completion::Incomplete(Some(needed)));
             }
 
-            // It is fine to use less_safe_update as we make sure to decrypt whole blocks at a time
-            let update = keys
-                .decryption
-                .less_safe_update(
-                    &self.buf[block_len..4 + packet_length.inner as usize],
-                    &mut self.decrypted_buf[block_len..4 + packet_length.inner as usize],
-                )
-                .unwrap();
-            assert_eq!(update.remainder().len(), 0);
-
-            let packet_excl_mac = &self.decrypted_buf[..4 + packet_length.inner as usize];
-
-            let mut hmac_ctx = hmac::Context::with_key(&keys.mac);
-            hmac_ctx.update(&self.sequence_number.to_be_bytes());
-            hmac_ctx.update(packet_excl_mac);
-            let actual_mac = hmac_ctx.sign();
-            let expected_mac = &self.buf[4 + packet_length.inner as usize
-                ..4 + packet_length.inner as usize
-                    + keys.mac.algorithm().digest_algorithm().output_len];
-            if constant_time::verify_slices_are_equal(actual_mac.as_ref(), expected_mac).is_err() {
+            // FIXME block_counter needs to start at 1
+            let Ok(_) = opening_key.open_in_place(
+                Aad::from(self.sequence_number.to_be_bytes()),
+                &mut self.buf
+                    [4..4 + packet_length.inner as usize + opening_key.algorithm().tag_len()],
+            ) else {
                 return Err(Error::InvalidMac);
-            }
+            };
 
-            (
-                packet_length,
-                keys.mac.algorithm().digest_algorithm().output_len,
-            )
+            (packet_length, opening_key.algorithm().tag_len())
         } else {
             let needed = 4;
             if self.buf.len() < needed {
@@ -135,10 +122,6 @@ impl ReadState {
             if self.buf.len() < needed {
                 return Ok(Completion::Incomplete(Some(needed)));
             }
-
-            self.decrypted_buf.clear();
-            self.decrypted_buf
-                .extend_from_slice(&self.buf[..4 + packet_length.inner as usize]);
 
             (packet_length, 0)
         };
@@ -157,7 +140,7 @@ impl ReadState {
         let Decoded {
             value: padding_length,
             next,
-        } = PaddingLength::decode(&self.decrypted_buf[4..4 + packet_length.inner as usize])?;
+        } = PaddingLength::decode(&self.buf[4..4 + packet_length.inner as usize])?;
 
         let payload_len = (packet_length.inner - 1 - padding_length.inner as u32) as usize;
         let Some(payload) = next.get(..payload_len) else {
@@ -203,31 +186,9 @@ impl Default for ReadState {
     fn default() -> Self {
         Self {
             buf: Vec::with_capacity(16_384),
-            decrypted_buf: Vec::with_capacity(16_384),
             last_length: 0,
-            decrypted_first_block: false,
             sequence_number: 0,
-            decryption_key: None,
-        }
-    }
-}
-
-/// Decryption and HMAC key for AES-128-CTR + HMAC-SHA256
-pub(crate) struct AesCtrReadKeys {
-    decryption: StreamingDecryptingKey,
-    mac: hmac::Key,
-}
-
-impl AesCtrReadKeys {
-    pub(crate) fn new(keys: RawKeys) -> Self {
-        Self {
-            decryption: StreamingDecryptingKey::ctr(
-                UnboundCipherKey::new(&cipher::AES_128, &keys.encryption_key.derive::<16>())
-                    .unwrap(),
-                cipher::DecryptionContext::Iv128(keys.initial_iv.derive::<16>().into()),
-            )
-            .unwrap(),
-            mac: hmac::Key::new(hmac::HMAC_SHA256, &keys.integrity_key.derive::<32>()),
+            opening_key: None,
         }
     }
 }
