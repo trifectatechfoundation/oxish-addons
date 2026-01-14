@@ -2,8 +2,10 @@ use core::iter;
 use std::io;
 
 use aws_lc_rs::{
-    cipher::{StreamingDecryptingKey, StreamingEncryptingKey},
-    constant_time, hmac, rand,
+    aead::{Aad, BoundKey, Nonce, NonceSequence, OpeningKey},
+    cipher::StreamingEncryptingKey,
+    error::Unspecified,
+    hmac, rand,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::debug;
@@ -74,6 +76,31 @@ impl From<u8> for MessageType {
     }
 }
 
+pub(crate) struct AesGcmNonce {
+    fixed: u32,
+    invocation_counter: u64,
+}
+
+impl AesGcmNonce {
+    pub(crate) fn from_iv(iv: [u8; 12]) -> Self {
+        Self {
+            fixed: u32::from_be_bytes(iv[..4].try_into().unwrap()),
+            invocation_counter: u64::from_be_bytes(iv[4..].try_into().unwrap()),
+        }
+    }
+}
+
+impl NonceSequence for AesGcmNonce {
+    fn advance(&mut self) -> Result<Nonce, Unspecified> {
+        let counter = self.invocation_counter;
+        self.invocation_counter = self.invocation_counter.checked_add(1).ok_or(Unspecified)?;
+        let mut nonce = [0; 12];
+        nonce[..4].copy_from_slice(&self.fixed.to_be_bytes());
+        nonce[4..].copy_from_slice(&counter.to_be_bytes());
+        Ok(Nonce::assume_unique_for_key(nonce))
+    }
+}
+
 /// A reader which decrypts data on the fly.
 ///
 /// ```text
@@ -84,11 +111,10 @@ impl From<u8> for MessageType {
 pub(crate) struct DecryptingReader<R: AsyncReadExt + Unpin> {
     stream: R,
     buf: Vec<u8>,
-    decrypted_buf: Vec<u8>,
     unread_start: usize,
 
     packet_number: u32,
-    decryption_key: Option<(StreamingDecryptingKey, hmac::Key)>,
+    opening_key: Option<OpeningKey<AesGcmNonce>>,
 }
 
 impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
@@ -96,10 +122,9 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
         Self {
             stream,
             buf: Vec::with_capacity(16_384),
-            decrypted_buf: Vec::with_capacity(16_384),
             unread_start: 0,
             packet_number: 0,
-            decryption_key: None,
+            opening_key: None,
         }
     }
 
@@ -126,7 +151,7 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
     ///
     /// This should only be used for reading the identification string.
     pub(crate) async fn read_u8_cleartext(&mut self) -> Result<u8, Error> {
-        assert!(self.decryption_key.is_none());
+        assert!(self.opening_key.is_none());
 
         Self::ensure_at_least(&mut self.stream, &mut self.buf, &mut self.unread_start, 1).await?;
 
@@ -135,13 +160,8 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
         Ok(byte)
     }
 
-    pub(crate) fn set_decryption_key(
-        &mut self,
-        decryption_key: StreamingDecryptingKey,
-        integrity_key: hmac::Key,
-    ) {
-        self.decrypted_buf.clear();
-        self.decryption_key = Some((decryption_key, integrity_key));
+    pub(crate) fn set_opening_key(&mut self, opening_key: OpeningKey<AesGcmNonce>) {
+        self.opening_key = Some(opening_key);
     }
 
     pub(crate) async fn read_packet<'a>(&'a mut self) -> Result<Packet<'a>, Error> {
@@ -150,43 +170,23 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
             self.buf.copy_within(self.unread_start.., 0);
         }
         self.buf.truncate(self.buf.len() - self.unread_start);
-        self.decrypted_buf.clear();
         self.unread_start = 0;
 
-        if let Some((decrypting_key, integrity_key)) = &mut self.decryption_key {
-            let block_len = decrypting_key.algorithm().block_len();
-
-            Self::ensure_at_least(
-                &mut self.stream,
-                &mut self.buf,
-                &mut self.unread_start,
-                block_len as u32,
-            )
-            .await?;
-            self.decrypted_buf.resize(self.buf.len() + block_len, 0);
-
-            let update = decrypting_key
-                .update(
-                    &self.buf[self.unread_start..self.unread_start + block_len],
-                    &mut self.decrypted_buf[self.unread_start..self.unread_start + 2 * block_len],
-                )
-                .unwrap();
-            assert_eq!(update.remainder().len(), block_len);
+        if let Some(opening_key) = &mut self.opening_key {
+            Self::ensure_at_least(&mut self.stream, &mut self.buf, &mut self.unread_start, 4)
+                .await?;
 
             let Decoded {
                 value: packet_length,
                 next,
-            } = PacketLength::decode(
-                &self.decrypted_buf[self.unread_start..self.unread_start + 4],
-            )?;
+            } = PacketLength::decode(&self.buf[self.unread_start..self.unread_start + 4])?;
             assert!(next.is_empty());
 
             Self::ensure_at_least(
                 &mut self.stream,
                 &mut self.buf,
                 &mut self.unread_start,
-                4 + packet_length.inner
-                    + integrity_key.algorithm().digest_algorithm().output_len as u32,
+                4 + packet_length.inner + opening_key.algorithm().tag_len() as u32,
             )
             .await?;
 
@@ -195,45 +195,30 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
             let packet_number = self.packet_number;
             self.packet_number = self.packet_number.wrapping_add(1);
 
-            let update = decrypting_key
-                .update(
-                    &self.buf[self.unread_start + block_len
-                        ..self.unread_start + 4 + packet_length.inner as usize],
-                    &mut self.decrypted_buf[self.unread_start + block_len
-                        ..self.unread_start + 4 + packet_length.inner as usize + block_len],
-                )
-                .unwrap();
-            assert_eq!(update.remainder().len(), block_len);
-
-            let mut hmac_ctx = hmac::Context::with_key(integrity_key);
-            hmac_ctx.update(&packet_number.to_be_bytes());
-            hmac_ctx.update(
-                &self.decrypted_buf
-                    [self.unread_start..self.unread_start + 4 + packet_length.inner as usize],
-            );
-            let actual_mac = hmac_ctx.sign();
-            let expected_mac = &self.buf[self.unread_start + 4 + packet_length.inner as usize
-                ..self.unread_start
-                    + 4
-                    + packet_length.inner as usize
-                    + integrity_key.algorithm().digest_algorithm().output_len];
-            if constant_time::verify_slices_are_equal(actual_mac.as_ref(), expected_mac).is_err() {
+            // FIXME block_counter needs to start at 1
+            let Ok(plaintext) = opening_key.open_in_place(
+                Aad::from(packet_number.to_be_bytes()),
+                &mut self.buf[self.unread_start + 4
+                    ..self.unread_start
+                        + 4
+                        + packet_length.inner as usize
+                        + opening_key.algorithm().tag_len()],
+            ) else {
                 return Err(Error::InvalidMac);
-            }
+            };
 
             let Decoded {
                 value: packet,
                 next,
-            } = Packet::decode(
-                packet_number,
-                &self.decrypted_buf
-                    [self.unread_start..self.unread_start + 4 + packet_length.inner as usize],
-            )?;
+            } = Packet::decode(packet_number, plaintext)?;
             assert!(next.is_empty());
 
-            self.unread_start += 4
+            self.unread_start += self.unread_start
+                + 4
                 + packet_length.inner as usize
-                + integrity_key.algorithm().digest_algorithm().output_len;
+                + opening_key.algorithm().tag_len();
+
+            dbg!(());
 
             Ok(packet)
         } else {
