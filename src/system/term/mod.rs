@@ -137,6 +137,12 @@ impl AsFd for PtyLeader {
     }
 }
 
+impl AsRawFd for PtyLeader {
+    fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+        self.file.as_raw_fd()
+    }
+}
+
 pub(crate) struct PtyFollower {
     file: File,
 }

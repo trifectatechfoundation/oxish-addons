@@ -14,6 +14,8 @@ pub(super) const SIGCONT_FG: SignalNumber = -2;
 /// Continue running in the background
 pub(super) const SIGCONT_BG: SignalNumber = -3;
 
+pub(crate) use parent::get_pty;
+
 enum CommandStatus {
     Exit(c_int),
     Term(SignalNumber),

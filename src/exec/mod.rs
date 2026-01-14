@@ -15,7 +15,7 @@ use crate::{
     },
     log::{dev_info, dev_warn, user_error},
     system::{
-        _exit, Group, User, interface::ProcessId, kill, killpg, mark_fds_as_cloexec, set_target_user, signal::{SignalNumber, SignalSet, consts::*, signal_name}, term::{TermSize, Terminal, UserTerm}, wait::{Wait, WaitError, WaitOptions}
+        _exit, Group, User, interface::ProcessId, kill, killpg, mark_fds_as_cloexec, set_target_user, signal::{SignalNumber, SignalSet, consts::*, signal_name}, term::{PtyFollower, TermSize, Terminal, UserTerm}, wait::{Wait, WaitError, WaitOptions}
     },
 };
 
@@ -24,6 +24,8 @@ use self::{
     io_util::was_interrupted,
     use_pty::{exec_pty, SIGCONT_BG, SIGCONT_FG},
 };
+
+pub(crate) use use_pty::get_pty;
 
 #[cfg(target_os = "linux")]
 use self::noexec::SpawnNoexecHandler;
@@ -68,6 +70,7 @@ pub fn run_command(
     options: RunOptions<'_>,
     env: impl IntoIterator<Item = (impl AsRef<OsStr>, impl AsRef<OsStr>)>,
     sock: UnixStream,
+    follower: PtyFollower
 ) -> io::Result<ExitReason> {
     // FIXME: should we pipe the stdio streams?
     let qualified_path = options.command;
@@ -170,7 +173,7 @@ pub fn run_command(
         spawn_noexec_handler,
         command,
         sock,
-        options.user,
+        follower,
     )
 }
 
