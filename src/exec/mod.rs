@@ -163,13 +163,13 @@ pub fn run_command(
 
     let sudo_pid = ProcessId::new(std::process::id() as i32);
 
-    let user_tty = UserTerm::open().unwrap();
+    // let user_tty = UserTerm::open().unwrap();
 
     exec_pty(
         sudo_pid,
         spawn_noexec_handler,
         command,
-        user_tty,
+        sock,
         options.user,
     )
 }

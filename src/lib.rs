@@ -10,7 +10,10 @@ use tokio::{
     runtime::Runtime,
 };
 
-use crate::system::{fork, ForkResult};
+use crate::{
+    log::{dev_info, SudoLogger},
+    system::{fork, ForkResult},
+};
 
 #[macro_use]
 mod macros;
@@ -45,8 +48,21 @@ pub fn telnet() {
                 sock.write(&command.len().to_ne_bytes()).await.unwrap();
                 sock.write(command).await.unwrap();
 
+                sock.write(b"touch hello_world.txt\ndate >> hello_world.txt\ncat hello_world.txt\necho \"DONE\"\n")
+                    .await
+                    .unwrap();
+                sock.flush().await.unwrap();
+
+                let mut buf = vec![0; 1024];
                 // loop forever so we don't exit
-                loop {}
+                loop {
+                    let read_len = sock.read(&mut buf).await.unwrap();
+                    println!(
+                        "OUTPUT: {}",
+                        String::from_utf8(buf[..read_len].to_vec()).unwrap()
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
             })
         }
         ForkResult::Child => {
@@ -64,6 +80,9 @@ pub fn telnet() {
             assert_eq!(command_len, read_len);
 
             let command = Path::new(OsStr::from_bytes(&buf));
+
+            SudoLogger::new("sshd").into_global_logger();
+            dev_info!("development logs are enabled");
 
             let _exit_reason = exec::run_command(
                 exec::RunOptions {

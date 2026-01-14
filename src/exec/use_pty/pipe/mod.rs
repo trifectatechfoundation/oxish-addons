@@ -6,7 +6,7 @@ use std::{
     os::fd::AsFd,
 };
 
-use crate::exec::event::{EventHandle, EventRegistry, PollEvent, Process};
+use crate::{exec::event::{EventHandle, EventRegistry, PollEvent, Process}, log::dev_debug};
 
 use self::ring_buffer::RingBuffer;
 
@@ -188,6 +188,8 @@ impl<R: Read, W: Write> Buffer<R, W> {
         // Read bytes and insert them into the buffer.
         let inserted_len = self.internal.insert(read)?;
 
+        dev_debug!("read {inserted_len} bytes into the ring buffer");
+
         // If we inserted something, the buffer is not empty anymore and we can resume writing.
         if inserted_len > 0 {
             self.write_handle.resume(registry);
@@ -212,6 +214,8 @@ impl<R: Read, W: Write> Buffer<R, W> {
 
         // Remove bytes from the buffer and write them.
         let removed_len = self.internal.remove(write)?;
+
+        dev_debug!("wrote {removed_len} bytes from the ring buffer");
 
         // Return whether we actually freed up some buffer space
         Ok(removed_len > 0)

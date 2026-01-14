@@ -1,5 +1,7 @@
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 
+use crate::log::dev_debug;
+
 pub(super) struct RingBuffer {
     storage: Box<[u8; Self::LEN]>,
     // The start index of the non-empty section of the buffer.
@@ -30,7 +32,18 @@ impl RingBuffer {
             // Case 1.1. The buffer is empty, meaning that there are two unfilled slices in
             // `storage`:`start..` and `..start`.
             let (second_slice, first_slice) = self.storage.split_at_mut(self.start);
-            read.read_vectored(&mut [first_slice, second_slice].map(IoSliceMut::new))?
+            let inserted_len =
+                read.read_vectored(&mut [first_slice, second_slice].map(IoSliceMut::new))?;
+
+            let (second_slice, first_slice) = self.storage.split_at(self.start);
+
+            let mut chunk = first_slice.to_vec();
+            chunk.extend_from_slice(second_slice);
+            dev_debug!(
+                "inserted: {:?}",
+                String::from_utf8_lossy(&chunk[..inserted_len]),
+            );
+            inserted_len
         } else {
             let &mut Self { start, len, .. } = self;
             let end = start + len;
@@ -38,14 +51,31 @@ impl RingBuffer {
                 // Case 1.2. The buffer is not empty and the filled section wraps around `storage`.
                 // Meaning that there is only one unfilled slice in `storage`: `end..start`.
                 let end = end % self.storage.len();
-                read.read(&mut self.storage[end..start])?
+                let inserted_len = read.read(&mut self.storage[end..start])?;
+                dev_debug!(
+                    "inserted: {:?}",
+                    String::from_utf8_lossy(&self.storage[end..start][..inserted_len])
+                );
+                inserted_len
             } else {
                 // Case 1.3. The buffer is not empty and the filled section is a contiguous slice
                 // of `storage`. Meaning that there are two unfilled slices in `storage`: `..start`
                 // and `end..`.
                 let (mid, first_slice) = self.storage.split_at_mut(end);
                 let second_slice = &mut mid[..start];
-                read.read_vectored(&mut [first_slice, second_slice].map(IoSliceMut::new))?
+                let inserted_len =
+                    read.read_vectored(&mut [first_slice, second_slice].map(IoSliceMut::new))?;
+
+                let (mid, first_slice) = self.storage.split_at(end);
+                let second_slice = &mid[..start];
+
+                let mut chunk = first_slice.to_vec();
+                chunk.extend_from_slice(second_slice);
+                dev_debug!(
+                    "inserted: {:?}",
+                    String::from_utf8_lossy(&chunk[..inserted_len]),
+                );
+                inserted_len
             }
         };
 
@@ -75,12 +105,26 @@ impl RingBuffer {
                 let end = end % self.storage.len();
                 let first_slice = &self.storage[self.start..];
                 let second_slice = &self.storage[..end];
-                write.write_vectored(&[first_slice, second_slice].map(IoSlice::new))?
+                let removed_len =
+                    write.write_vectored(&[first_slice, second_slice].map(IoSlice::new))?;
+
+                let mut chunk = first_slice.to_vec();
+                chunk.extend_from_slice(second_slice);
+                dev_debug!(
+                    "removed: {:?}",
+                    String::from_utf8_lossy(&chunk[..removed_len]),
+                );
+                removed_len
             } else {
                 // Case 2.3. The buffer is not full and the filled section is a contiguous slice
                 // of `storage.` Meaning that there is only one filled slice in `storage`:
                 // `start..end`.
-                write.write(&self.storage[self.start..end])?
+                let removed_len = write.write(&self.storage[self.start..end])?;
+                dev_debug!(
+                    "removed: {:?}",
+                    String::from_utf8_lossy(&self.storage[self.start..end][..removed_len])
+                );
+                removed_len
             }
         };
 

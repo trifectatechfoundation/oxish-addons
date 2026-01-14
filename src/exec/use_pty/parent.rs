@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_int;
 use std::io;
+use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 
 use crate::exec::event::{EventHandle, EventRegistry, PollEvent, Process, StopReason};
@@ -29,7 +30,7 @@ pub(in crate::exec) fn exec_pty(
     sudo_pid: ProcessId,
     spawn_noexec_handler: Option<SpawnNoexecHandler>,
     mut command: Command,
-    user_tty: UserTerm,
+    sock: UnixStream,
     pty_owner: &User,
 ) -> io::Result<ExitReason> {
     // Allocate a pseudoterminal.
@@ -74,19 +75,20 @@ pub(in crate::exec) fn exec_pty(
 
     // Pipe data between both terminals
     let mut tty_pipe = Pipe::new(
-        user_tty,
+        sock,
         pty.leader,
         &mut registry,
         ParentEvent::Tty,
         ParentEvent::Pty,
     );
 
-    let user_tty = tty_pipe.left_mut();
+    // let user_tty = tty_pipe.left_mut();
 
     // Check if we are the foreground process
-    let mut foreground = user_tty
-        .tcgetpgrp()
-        .is_ok_and(|tty_pgrp| tty_pgrp == parent_pgrp);
+    // let mut foreground = user_tty
+    //     .tcgetpgrp()
+    //     .is_ok_and(|tty_pgrp| tty_pgrp == parent_pgrp);
+    let foreground = true;
     dev_info!(
         "sudo is running in the {}",
         cond_fmt(foreground, "foreground", "background")
@@ -95,70 +97,70 @@ pub(in crate::exec) fn exec_pty(
     // FIXME: maybe all these boolean flags should be on a dedicated type.
 
     // Whether the command should be executed in the background (this is not the `-b` flag)
-    let mut exec_bg = false;
+    let exec_bg = false;
     // Whether the user's terminal is in raw mode or not.
-    let mut term_raw = false;
+    let term_raw = true;
     // Whether to preserve oflag for the terminal
-    let mut preserve_oflag = false;
+    let preserve_oflag = false;
 
-    // Check if we are part of a pipeline.
-    // FIXME: Here's where we should intercept the IO streams if we want to implement IO logging.
-    // FIXME: ogsudo creates pipes for the IO streams and uses events to read from the strams to
-    // the pipes. Investigate why.
-    if !io::stdin().is_terminal_for_pgrp(parent_pgrp) {
-        dev_info!("stdin is not a terminal, command will inherit it");
-        if io::stdin().is_pipe() {
-            exec_bg = true;
-        }
-        command.stdin(Stdio::inherit());
-
-        if foreground && parent_pgrp != sudo_pid {
-            // If sudo is not the process group leader and stdin is not a terminal we might be
-            // running as a background job via a shell script. Starting in the foreground would
-            // change the terminal mode.
-            exec_bg = true;
-        }
-    }
-
-    if !io::stdout().is_terminal_for_pgrp(parent_pgrp) {
-        dev_info!("stdout is not a terminal, command will inherit it");
-        if io::stdout().is_pipe() {
-            exec_bg = true;
-            preserve_oflag = true;
-        }
-        command.stdout(Stdio::inherit());
-    }
-
-    if !io::stderr().is_terminal_for_pgrp(parent_pgrp) {
-        dev_info!("stderr is not a terminal, command will inherit it");
-        command.stderr(Stdio::inherit());
-    }
-
-    // If there is another process later in the pipeline, don't interfere
-    // with its access to the Tty
-    if io::stdout().is_pipe() {
-        foreground = false;
-    }
+    // // Check if we are part of a pipeline.
+    // // FIXME: Here's where we should intercept the IO streams if we want to implement IO logging.
+    // // FIXME: ogsudo creates pipes for the IO streams and uses events to read from the strams to
+    // // the pipes. Investigate why.
+    // if !io::stdin().is_terminal_for_pgrp(parent_pgrp) {
+    //     dev_info!("stdin is not a terminal, command will inherit it");
+    //     if io::stdin().is_pipe() {
+    //         exec_bg = true;
+    //     }
+    //     command.stdin(Stdio::inherit());
+    //
+    //     if foreground && parent_pgrp != sudo_pid {
+    //         // If sudo is not the process group leader and stdin is not a terminal we might be
+    //         // running as a background job via a shell script. Starting in the foreground would
+    //         // change the terminal mode.
+    //         exec_bg = true;
+    //     }
+    // }
+    //
+    // if !io::stdout().is_terminal_for_pgrp(parent_pgrp) {
+    //     dev_info!("stdout is not a terminal, command will inherit it");
+    //     if io::stdout().is_pipe() {
+    //         exec_bg = true;
+    //         preserve_oflag = true;
+    //     }
+    //     command.stdout(Stdio::inherit());
+    // }
+    //
+    // if !io::stderr().is_terminal_for_pgrp(parent_pgrp) {
+    //     dev_info!("stderr is not a terminal, command will inherit it");
+    //     command.stderr(Stdio::inherit());
+    // }
+    //
+    // // If there is another process later in the pipeline, don't interfere
+    // // with its access to the Tty
+    // if io::stdout().is_pipe() {
+    //     foreground = false;
+    // }
 
     // Copy terminal settings from `/dev/tty` to the pty.
-    if let Err(err) = user_tty.copy_to(&pty.follower) {
-        dev_error!("cannot copy terminal settings to pty: {err}");
-        foreground = false;
-    }
+    // if let Err(err) = user_tty.copy_to(&pty.follower) {
+    //     dev_error!("cannot copy terminal settings to pty: {err}");
+    //     foreground = false;
+    // }
 
     // Start in raw mode unless we're part of a pipeline or backgrounded.
-    if foreground && !exec_bg {
-        // Clearer this way that set_raw_mode only conditionally runs
-        #[allow(clippy::collapsible_if)]
-        if user_tty.set_raw_mode(false, preserve_oflag).is_ok() {
-            term_raw = true;
-        }
-    }
+    // if foreground && !exec_bg {
+    //     // Clearer this way that set_raw_mode only conditionally runs
+    //     #[allow(clippy::collapsible_if)]
+    //     if user_tty.set_raw_mode(false, preserve_oflag).is_ok() {
+    //         term_raw = true;
+    //     }
+    // }
 
-    let tty_size = tty_pipe.left().get_size().map_err(|err| {
-        dev_error!("cannot get terminal size: {err}");
-        err
-    })?;
+    // let tty_size = tty_pipe.left().get_size().map_err(|err| {
+    //     dev_error!("cannot get terminal size: {err}");
+    //     err
+    // })?;
 
     // Block all the signals until we are done setting up the signal handlers so we don't miss
     // SIGCHLD.
@@ -234,7 +236,7 @@ pub(in crate::exec) fn exec_pty(
         parent_pgrp,
         backchannels.parent,
         tty_pipe,
-        tty_size,
+        // tty_size,
         foreground,
         term_raw,
         preserve_oflag,
@@ -256,17 +258,17 @@ pub(in crate::exec) fn exec_pty(
     closure.tty_pipe.flush_left().ok();
 
     // Restore the terminal settings
-    if closure.term_raw {
-        // Only restore the terminal if sudo is the foreground process.
-        if let Ok(pgrp) = closure.tty_pipe.left().tcgetpgrp() {
-            if pgrp == closure.parent_pgrp {
-                match closure.tty_pipe.left_mut().restore(false) {
-                    Ok(()) => closure.term_raw = false,
-                    Err(err) => dev_warn!("cannot restore terminal settings: {err}"),
-                }
-            }
-        }
-    }
+    // if closure.term_raw {
+    //     // Only restore the terminal if sudo is the foreground process.
+    //     if let Ok(pgrp) = closure.tty_pipe.left().tcgetpgrp() {
+    //         if pgrp == closure.parent_pgrp {
+    //             match closure.tty_pipe.left_mut().restore(false) {
+    //                 Ok(()) => closure.term_raw = false,
+    //                 Err(err) => dev_warn!("cannot restore terminal settings: {err}"),
+    //             }
+    //         }
+    //     }
+    // }
 
     // Restore signal handlers
     drop(closure.signal_handlers);
@@ -301,8 +303,8 @@ struct ParentClosure {
     sudo_pid: ProcessId,
     parent_pgrp: ProcessId,
     command_pid: Option<ProcessId>,
-    tty_pipe: Pipe<UserTerm, PtyLeader>,
-    tty_size: TermSize,
+    tty_pipe: Pipe<UnixStream, PtyLeader>,
+    // tty_size: TermSize,
     foreground: bool,
     term_raw: bool,
     preserve_oflag: bool,
@@ -325,8 +327,8 @@ impl ParentClosure {
         sudo_pid: ProcessId,
         parent_pgrp: ProcessId,
         mut backchannel: ParentBackchannel,
-        tty_pipe: Pipe<UserTerm, PtyLeader>,
-        tty_size: TermSize,
+        tty_pipe: Pipe<UnixStream, PtyLeader>,
+        // tty_size: TermSize,
         foreground: bool,
         term_raw: bool,
         preserve_oflag: bool,
@@ -354,7 +356,7 @@ impl ParentClosure {
             parent_pgrp,
             command_pid: None,
             tty_pipe,
-            tty_size,
+            // tty_size,
             foreground,
             term_raw,
             preserve_oflag,
@@ -538,18 +540,18 @@ impl ParentClosure {
                     "command received {}, parent running in the foreground",
                     signal_fmt(signal)
                 );
-                if !self.term_raw {
-                    if self
-                        .tty_pipe
-                        .left_mut()
-                        .set_raw_mode(false, self.preserve_oflag)
-                        .is_ok()
-                    {
-                        self.term_raw = true;
-                    }
-                    // Resume command in the foreground
-                    return Some(SIGCONT_FG);
-                }
+                // if !self.term_raw {
+                //     if self
+                //         .tty_pipe
+                //         .left_mut()
+                //         .set_raw_mode(false, self.preserve_oflag)
+                //         .is_ok()
+                //     {
+                //         self.term_raw = true;
+                //     }
+                //     // Resume command in the foreground
+                //     return Some(SIGCONT_FG);
+                // }
             }
         }
 
@@ -557,10 +559,10 @@ impl ParentClosure {
         self.tty_pipe.ignore_events(registry);
 
         if self.term_raw {
-            match self.tty_pipe.left_mut().restore(false) {
-                Ok(()) => self.term_raw = false,
-                Err(err) => dev_warn!("cannot restore terminal settings: {err}"),
-            }
+            // match self.tty_pipe.left_mut().restore(false) {
+            //     Ok(()) => self.term_raw = false,
+            //     Err(err) => dev_warn!("cannot restore terminal settings: {err}"),
+            // }
         }
 
         let signal_handler = if signal != SIGSTOP {
@@ -600,8 +602,8 @@ impl ParentClosure {
 
     /// Check whether we are part of the foreground process group and update the foreground flag.
     fn check_foreground(&mut self) -> io::Result<()> {
-        let pgrp = self.tty_pipe.left().tcgetpgrp()?;
-        self.foreground = pgrp == self.parent_pgrp;
+        // let pgrp = self.tty_pipe.left().tcgetpgrp()?;
+        // self.foreground = pgrp == self.parent_pgrp;
         Ok(())
     }
 
@@ -610,13 +612,13 @@ impl ParentClosure {
         self.check_foreground()?;
 
         // Update the pty settings based on the user's tty.
-        self.tty_pipe
-            .left()
-            .copy_to(self.tty_pipe.right())
-            .map_err(|err| {
-                dev_error!("cannot copy terminal settings to pty: {err}");
-                err
-            })?;
+        // self.tty_pipe
+        //     .left()
+        //     .copy_to(self.tty_pipe.right())
+        //     .map_err(|err| {
+        //         dev_error!("cannot copy terminal settings to pty: {err}");
+        //         err
+        //     })?;
         // FIXME: sync the terminal size here.
         dev_info!(
             "parent is in {} ({} -> {})",
@@ -627,14 +629,14 @@ impl ParentClosure {
 
         if self.foreground {
             // We're in the foreground, set tty to raw mode.
-            if self
-                .tty_pipe
-                .left_mut()
-                .set_raw_mode(false, self.preserve_oflag)
-                .is_ok()
-            {
-                self.term_raw = true;
-            }
+            // if self
+            //     .tty_pipe
+            //     .left_mut()
+            //     .set_raw_mode(false, self.preserve_oflag)
+            //     .is_ok()
+            // {
+            //     self.term_raw = true;
+            // }
         } else {
             // We're in the background, cannot access tty.
             self.term_raw = false;
@@ -684,20 +686,20 @@ impl ParentClosure {
     }
 
     fn handle_sigwinch(&mut self) -> io::Result<()> {
-        let new_size = self.tty_pipe.left().get_size()?;
-
-        if new_size != self.tty_size {
-            dev_info!("updating pty size from {} to {new_size}", self.tty_size);
-            // Set the pty size.
-            self.tty_pipe.right().set_size(&new_size)?;
-            // Send SIGWINCH to the command.
-            if let Some(command_pid) = self.command_pid {
-                killpg(command_pid, SIGWINCH).ok();
-            }
-            // Update the terminal size.
-            self.tty_size = new_size;
-        }
-
+        // let new_size = self.tty_pipe.left().get_size()?;
+        //
+        // if new_size != self.tty_size {
+        //     dev_info!("updating pty size from {} to {new_size}", self.tty_size);
+        //     // Set the pty size.
+        //     self.tty_pipe.right().set_size(&new_size)?;
+        //     // Send SIGWINCH to the command.
+        //     if let Some(command_pid) = self.command_pid {
+        //         killpg(command_pid, SIGWINCH).ok();
+        //     }
+        //     // Update the terminal size.
+        //     self.tty_size = new_size;
+        // }
+        //
         Ok(())
     }
 }
@@ -739,12 +741,13 @@ impl Process for ParentClosure {
             ParentEvent::Signal => self.on_signal(registry),
             ParentEvent::Tty(poll_event) => {
                 // Check if tty which existed is now gone.
-                if self.tty_pipe.left().tcgetsid().is_err() {
-                    dev_warn!("tty gone (closed/detached), ignoring future events");
-                    self.tty_pipe.ignore_events(registry);
-                } else {
-                    self.tty_pipe.on_left_event(poll_event, registry).ok();
-                }
+                // if self.tty_pipe.left().tcgetsid().is_err() {
+                //     dev_warn!("tty gone (closed/detached), ignoring future events");
+                //     self.tty_pipe.ignore_events(registry);
+                // } else {
+                //     self.tty_pipe.on_left_event(poll_event, registry).ok();
+                // }
+                self.tty_pipe.on_left_event(poll_event, registry).ok();
             }
             ParentEvent::Pty(poll_event) => {
                 self.tty_pipe.on_right_event(poll_event, registry).ok();
