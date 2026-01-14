@@ -1,9 +1,9 @@
 use std::{io::Write, str};
 
 use aws_lc_rs::{
+    aead::chacha20_poly1305_openssh::{OpeningKey, SealingKey},
     agreement::{self, EphemeralPrivateKey, UnparsedPublicKey, X25519},
-    cipher::{StreamingDecryptingKey, StreamingEncryptingKey, UnboundCipherKey, AES_128},
-    digest, hmac,
+    digest,
     rand::{self, SystemRandom},
     signature::KeyPair,
 };
@@ -177,41 +177,13 @@ impl EcdhKeyExchange {
             server_to_client: RawKeys::server_to_client(&derivation),
         };
 
-        conn.stream_read.set_decryption_key(
-            StreamingDecryptingKey::ctr(
-                UnboundCipherKey::new(
-                    &AES_128,
-                    &raw_keys.client_to_server.encryption_key.derive::<16>(),
-                )
-                .unwrap(),
-                aws_lc_rs::cipher::DecryptionContext::Iv128(
-                    raw_keys.client_to_server.initial_iv.derive::<16>().into(),
-                ),
-            )
-            .unwrap(),
-            hmac::Key::new(
-                hmac::HMAC_SHA256,
-                &raw_keys.client_to_server.integrity_key.derive::<16>(),
-            ),
-        );
+        conn.stream_read.set_opening_key(OpeningKey::new(
+            &raw_keys.client_to_server.encryption_key.derive(),
+        ));
 
-        conn.stream_write.set_encryption_key(
-            StreamingEncryptingKey::less_safe_ctr(
-                UnboundCipherKey::new(
-                    &AES_128,
-                    &raw_keys.server_to_client.encryption_key.derive::<16>(),
-                )
-                .unwrap(),
-                aws_lc_rs::cipher::EncryptionContext::Iv128(
-                    raw_keys.server_to_client.initial_iv.derive::<16>().into(),
-                ),
-            )
-            .unwrap(),
-            hmac::Key::new(
-                hmac::HMAC_SHA256,
-                &raw_keys.server_to_client.integrity_key.derive::<16>(),
-            ),
-        );
+        conn.stream_write.set_sealing_key(SealingKey::new(
+            &raw_keys.server_to_client.encryption_key.derive(),
+        ));
 
         Ok(())
     }
@@ -440,10 +412,14 @@ impl KeyExchangeInit<'static> {
             cookie,
             key_exchange_algorithms: vec![KeyExchangeAlgorithm::Curve25519Sha256],
             server_host_key_algorithms: vec![PublicKeyAlgorithm::Ed25519],
-            encryption_algorithms_client_to_server: vec![EncryptionAlgorithm::Aes128Ctr],
-            encryption_algorithms_server_to_client: vec![EncryptionAlgorithm::Aes128Ctr],
-            mac_algorithms_client_to_server: vec![MacAlgorithm::HmacSha2256],
-            mac_algorithms_server_to_client: vec![MacAlgorithm::HmacSha2256],
+            encryption_algorithms_client_to_server: vec![
+                EncryptionAlgorithm::ChaCha20Poly1305OpenSsh,
+            ],
+            encryption_algorithms_server_to_client: vec![
+                EncryptionAlgorithm::ChaCha20Poly1305OpenSsh,
+            ],
+            mac_algorithms_client_to_server: vec![],
+            mac_algorithms_server_to_client: vec![],
             compression_algorithms_client_to_server: vec![CompressionAlgorithm::None],
             compression_algorithms_server_to_client: vec![CompressionAlgorithm::None],
             languages_client_to_server: vec![],
@@ -798,15 +774,17 @@ impl<'a> From<&'a str> for PublicKeyAlgorithm<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EncryptionAlgorithm<'a> {
-    /// aes128-ctr (<https://www.rfc-editor.org/rfc/rfc4344#section-4>)
-    Aes128Ctr,
+    /// chacha20-poly1305@openssh.com (<https://datatracker.ietf.org/doc/draft-ietf-sshm-chacha20-poly1305/>)
+    ChaCha20Poly1305OpenSsh,
     Unknown(&'a str),
 }
 
 impl Encode for EncryptionAlgorithm<'_> {
     fn encode(&self, buf: &mut Vec<u8>) {
         match self {
-            Self::Aes128Ctr => buf.extend_from_slice(b"aes128-ctr"),
+            Self::ChaCha20Poly1305OpenSsh => {
+                buf.extend_from_slice(b"chacha20-poly1305@openssh.com")
+            }
             Self::Unknown(name) => buf.extend_from_slice(name.as_bytes()),
         }
     }
@@ -815,7 +793,7 @@ impl Encode for EncryptionAlgorithm<'_> {
 impl<'a> From<&'a str> for EncryptionAlgorithm<'a> {
     fn from(value: &'a str) -> Self {
         match value {
-            "aes128-ctr" => Self::Aes128Ctr,
+            "chacha20-poly1305@openssh.com" => Self::ChaCha20Poly1305OpenSsh,
             _ => Self::Unknown(value),
         }
     }
@@ -823,15 +801,12 @@ impl<'a> From<&'a str> for EncryptionAlgorithm<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MacAlgorithm<'a> {
-    /// hmac-sha2-256 (<https://www.rfc-editor.org/rfc/rfc6668#section-2>)
-    HmacSha2256,
     Unknown(&'a str),
 }
 
 impl Encode for MacAlgorithm<'_> {
     fn encode(&self, buf: &mut Vec<u8>) {
         match self {
-            Self::HmacSha2256 => buf.extend_from_slice(b"hmac-sha2-256"),
             Self::Unknown(name) => buf.extend_from_slice(name.as_bytes()),
         }
     }
@@ -840,7 +815,6 @@ impl Encode for MacAlgorithm<'_> {
 impl<'a> From<&'a str> for MacAlgorithm<'a> {
     fn from(value: &'a str) -> Self {
         match value {
-            "hmac-sha2-256" => Self::HmacSha2256,
             _ => Self::Unknown(value),
         }
     }
