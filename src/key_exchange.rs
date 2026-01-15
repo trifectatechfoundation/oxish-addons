@@ -177,7 +177,7 @@ impl EcdhKeyExchange {
             server_to_client: RawKeys::server_to_client(&derivation),
         };
 
-        conn.stream_read.set_decryption_key(
+        conn.stream_read.decryption_key = Some((
             StreamingDecryptingKey::ctr(
                 UnboundCipherKey::new(
                     &AES_128,
@@ -195,7 +195,7 @@ impl EcdhKeyExchange {
                 hmac::HMAC_SHA256,
                 &raw_keys.client_to_server.integrity_key.as_ref()[..32],
             ),
-        );
+        ));
 
         conn.stream_write.set_encryption_key(
             StreamingEncryptingKey::less_safe_ctr(
