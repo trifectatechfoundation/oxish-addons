@@ -75,12 +75,7 @@ impl From<u8> for MessageType {
 }
 
 /// A reader which decrypts data on the fly.
-///
-/// ```text
-///      +---- unread_start
-///      v
-/// |read|unread and not yet decrypted|
-/// ```
+// FIXME implement in-place decryption once aws-lc-rs supports this for AES-CTR.
 pub(crate) struct DecryptingReader<R: AsyncReadExt + Unpin> {
     stream: R,
     buf: Vec<u8>,
@@ -88,7 +83,7 @@ pub(crate) struct DecryptingReader<R: AsyncReadExt + Unpin> {
     unread_start: usize,
 
     packet_number: u32,
-    decryption_key: Option<(StreamingDecryptingKey, hmac::Key)>,
+    pub(crate) decryption_key: Option<(StreamingDecryptingKey, hmac::Key)>,
 }
 
 impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
@@ -135,25 +130,19 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
         Ok(byte)
     }
 
-    pub(crate) fn set_decryption_key(
-        &mut self,
-        decryption_key: StreamingDecryptingKey,
-        integrity_key: hmac::Key,
-    ) {
-        self.decrypted_buf.clear();
-        self.decryption_key = Some((decryption_key, integrity_key));
-    }
-
     pub(crate) async fn read_packet<'a>(&'a mut self) -> Result<Packet<'a>, Error> {
         // Compact the internal buffer
         if self.unread_start > 0 {
             self.buf.copy_within(self.unread_start.., 0);
+            self.buf.truncate(self.buf.len() - self.unread_start);
+            self.unread_start = 0;
+            self.decrypted_buf.clear();
         }
-        self.buf.truncate(self.buf.len() - self.unread_start);
-        self.decrypted_buf.clear();
-        self.unread_start = 0;
 
-        if let Some((decrypting_key, integrity_key)) = &mut self.decryption_key {
+        let (packet_without_mac, mac_len) = if let Some((decrypting_key, integrity_key)) =
+            &mut self.decryption_key
+        // comment to prevent rustfmt indenting the entire if
+        {
             let block_len = decrypting_key.algorithm().block_len();
 
             Self::ensure_at_least(
@@ -163,22 +152,18 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
                 block_len as u32,
             )
             .await?;
-            self.decrypted_buf.resize(self.buf.len() + block_len, 0);
+            self.decrypted_buf.resize(block_len, 0);
 
+            // It is fine to use less_safe_update as we make sure to decrypt whole blocks at a time
             let update = decrypting_key
-                .update(
-                    &self.buf[self.unread_start..self.unread_start + block_len],
-                    &mut self.decrypted_buf[self.unread_start..self.unread_start + 2 * block_len],
-                )
+                .less_safe_update(&self.buf[..block_len], &mut self.decrypted_buf[..block_len])
                 .unwrap();
-            assert_eq!(update.remainder().len(), block_len);
+            assert_eq!(update.remainder().len(), 0);
 
             let Decoded {
                 value: packet_length,
                 next,
-            } = PacketLength::decode(
-                &self.decrypted_buf[self.unread_start..self.unread_start + 4],
-            )?;
+            } = PacketLength::decode(&self.decrypted_buf[..4])?;
             assert!(next.is_empty());
 
             Self::ensure_at_least(
@@ -189,60 +174,42 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
                     + integrity_key.algorithm().digest_algorithm().output_len as u32,
             )
             .await?;
+            self.decrypted_buf
+                .resize(4 + packet_length.inner as usize, 0);
 
-            // Note: this needs to be done AFTER the IO to ensure
-            // this async function is cancel-safe
-            let packet_number = self.packet_number;
-            self.packet_number = self.packet_number.wrapping_add(1);
-
+            // It is fine to use less_safe_update as we make sure to decrypt whole blocks at a time
             let update = decrypting_key
-                .update(
-                    &self.buf[self.unread_start + block_len
-                        ..self.unread_start + 4 + packet_length.inner as usize],
-                    &mut self.decrypted_buf[self.unread_start + block_len
-                        ..self.unread_start + 4 + packet_length.inner as usize + block_len],
+                .less_safe_update(
+                    &self.buf[block_len..4 + packet_length.inner as usize],
+                    &mut self.decrypted_buf[block_len..4 + packet_length.inner as usize],
                 )
                 .unwrap();
-            assert_eq!(update.remainder().len(), block_len);
+            assert_eq!(update.remainder().len(), 0);
+
+            let packet_excl_mac = &self.decrypted_buf[..4 + packet_length.inner as usize];
 
             let mut hmac_ctx = hmac::Context::with_key(integrity_key);
-            hmac_ctx.update(&packet_number.to_be_bytes());
-            hmac_ctx.update(
-                &self.decrypted_buf
-                    [self.unread_start..self.unread_start + 4 + packet_length.inner as usize],
-            );
+            hmac_ctx.update(&self.packet_number.to_be_bytes());
+            hmac_ctx.update(packet_excl_mac);
             let actual_mac = hmac_ctx.sign();
-            let expected_mac = &self.buf[self.unread_start + 4 + packet_length.inner as usize
-                ..self.unread_start
-                    + 4
-                    + packet_length.inner as usize
+            let expected_mac = &self.buf[4 + packet_length.inner as usize
+                ..4 + packet_length.inner as usize
                     + integrity_key.algorithm().digest_algorithm().output_len];
             if constant_time::verify_slices_are_equal(actual_mac.as_ref(), expected_mac).is_err() {
                 return Err(Error::InvalidMac);
             }
 
-            let Decoded {
-                value: packet,
-                next,
-            } = Packet::decode(
-                packet_number,
-                &self.decrypted_buf
-                    [self.unread_start..self.unread_start + 4 + packet_length.inner as usize],
-            )?;
-            assert!(next.is_empty());
-
-            self.unread_start += 4
-                + packet_length.inner as usize
-                + integrity_key.algorithm().digest_algorithm().output_len;
-
-            Ok(packet)
+            (
+                packet_excl_mac,
+                integrity_key.algorithm().digest_algorithm().output_len,
+            )
         } else {
             Self::ensure_at_least(&mut self.stream, &mut self.buf, &mut self.unread_start, 4)
                 .await?;
             let Decoded {
                 value: packet_length,
                 next,
-            } = PacketLength::decode(&self.buf[self.unread_start..self.unread_start + 4])?;
+            } = PacketLength::decode(&self.buf[..4])?;
             assert!(next.is_empty());
 
             Self::ensure_at_least(
@@ -253,24 +220,23 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
             )
             .await?;
 
-            // Note: this needs to be done AFTER the IO to ensure
-            // this async function is cancel-safe
-            let packet_number = self.packet_number;
-            self.packet_number = self.packet_number.wrapping_add(1);
+            (&self.buf[..4 + packet_length.inner as usize], 0)
+        };
 
-            let Decoded {
-                value: packet,
-                next,
-            } = Packet::decode(
-                packet_number,
-                &self.buf[self.unread_start..self.unread_start + 4 + packet_length.inner as usize],
-            )?;
-            assert!(next.is_empty());
+        // Note: this needs to be done AFTER the IO to ensure
+        // this async function is cancel-safe
+        let packet_number = self.packet_number;
+        self.packet_number = self.packet_number.wrapping_add(1);
 
-            self.unread_start += 4 + packet_length.inner as usize;
+        let Decoded {
+            value: packet,
+            next,
+        } = Packet::decode(packet_number, packet_without_mac)?;
+        assert!(next.is_empty());
 
-            Ok(packet)
-        }
+        self.unread_start = packet_without_mac.len() + mac_len;
+
+        Ok(packet)
     }
 }
 
