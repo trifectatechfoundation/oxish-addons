@@ -90,6 +90,31 @@ impl AsyncWrite for AsyncPtyLeader {
     }
 }
 
+async fn do_stuff(mut leader: AsyncPtyLeader, mut sock: UnixStream) {
+    // Send the command we want to run to the child process
+    let command = b"/bin/sh";
+    let _ = sock.write(&command.len().to_ne_bytes()).await.unwrap();
+    let _ = sock.write(command).await.unwrap();
+
+    let _ = leader
+        .write(
+            b"touch hello_world.txt\ndate >> hello_world.txt\ncat hello_world.txt\necho \"DONE\"\n",
+        )
+        .await
+        .unwrap();
+
+    let mut buf = vec![0; 1024];
+    // loop forever so we don't exit
+    loop {
+        let read_len = leader.read(&mut buf).await.unwrap();
+        println!(
+            "OUTPUT: {}",
+            String::from_utf8(buf[..read_len].to_vec()).unwrap()
+        );
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+}
+
 pub fn runtime() {
     use crate::{exec, system::User};
     use std::path::Path;
@@ -106,33 +131,15 @@ pub fn runtime() {
             let runtime = Runtime::new().unwrap();
 
             runtime.block_on(async move {
-                let mut leader = AsyncPtyLeader {
+                let leader = AsyncPtyLeader {
                     fd: AsyncFd::new(pty.leader).unwrap(),
                 };
 
                 // Turn the std socket into a tokio socket
-                let mut sock = UnixStream::from_std(left_sock).unwrap();
+                let sock = UnixStream::from_std(left_sock).unwrap();
 
-                // Send the command we want to run to the child process
-                let command = b"/bin/sh";
-                sock.write(&command.len().to_ne_bytes()).await.unwrap();
-                sock.write(command).await.unwrap();
-
-                leader.write(b"touch hello_world.txt\ndate >> hello_world.txt\ncat hello_world.txt\necho \"DONE\"\n")
-                    .await
-                    .unwrap();
-
-                let mut buf = vec![0; 1024];
-                // loop forever so we don't exit
-                loop {
-                    let read_len = leader.read(&mut buf).await.unwrap();
-                    println!(
-                        "OUTPUT: {}",
-                        String::from_utf8(buf[..read_len].to_vec()).unwrap()
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                }
-            })
+                do_stuff(leader, sock).await
+            });
         }
         ForkResult::Child => {
             let mut sock = right_sock;

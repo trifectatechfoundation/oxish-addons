@@ -6,7 +6,10 @@ use std::{
     os::fd::AsFd,
 };
 
-use crate::{exec::event::{EventHandle, EventRegistry, PollEvent, Process}, log::dev_debug};
+use crate::{
+    exec::event::{EventHandle, EventRegistry, PollEvent, Process},
+    log::dev_debug,
+};
 
 use self::ring_buffer::RingBuffer;
 

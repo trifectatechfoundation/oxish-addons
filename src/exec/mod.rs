@@ -6,16 +6,32 @@ mod noexec;
 mod use_pty;
 
 use std::{
-    borrow::Cow, env, ffi::{OsStr, c_int}, io::{self, Read, Write}, os::{fd::AsFd, unix::{ffi::OsStrExt, net::UnixStream, process::CommandExt}}, path::{Path, PathBuf}, process::Command, sync::Mutex, time::Duration
+    borrow::Cow,
+    env,
+    ffi::{c_int, OsStr},
+    io::{self, Read, Write},
+    os::{
+        fd::AsFd,
+        unix::{ffi::OsStrExt, net::UnixStream, process::CommandExt},
+    },
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Mutex,
+    time::Duration,
 };
 
 use crate::{
     common::{
-        HARDENED_ENUM_VALUE_0, HARDENED_ENUM_VALUE_1, HARDENED_ENUM_VALUE_2, bin_serde::BinPipe
+        bin_serde::BinPipe, HARDENED_ENUM_VALUE_0, HARDENED_ENUM_VALUE_1, HARDENED_ENUM_VALUE_2,
     },
     log::{dev_info, dev_warn, user_error},
     system::{
-        _exit, Group, User, interface::ProcessId, kill, killpg, mark_fds_as_cloexec, set_target_user, signal::{SignalNumber, SignalSet, consts::*, signal_name}, term::{PtyFollower, TermSize, Terminal, UserTerm}, wait::{Wait, WaitError, WaitOptions}
+        Group, User, _exit,
+        interface::ProcessId,
+        kill, killpg, mark_fds_as_cloexec, set_target_user,
+        signal::{consts::*, signal_name, SignalNumber, SignalSet},
+        term::{PtyFollower, TermSize, Terminal, UserTerm},
+        wait::{Wait, WaitError, WaitOptions},
     },
 };
 
@@ -70,7 +86,7 @@ pub fn run_command(
     options: RunOptions<'_>,
     env: impl IntoIterator<Item = (impl AsRef<OsStr>, impl AsRef<OsStr>)>,
     sock: UnixStream,
-    follower: PtyFollower
+    follower: PtyFollower,
 ) -> io::Result<ExitReason> {
     // FIXME: should we pipe the stdio streams?
     let qualified_path = options.command;
@@ -168,13 +184,7 @@ pub fn run_command(
 
     // let user_tty = UserTerm::open().unwrap();
 
-    exec_pty(
-        sudo_pid,
-        spawn_noexec_handler,
-        command,
-        sock,
-        follower,
-    )
+    exec_pty(sudo_pid, spawn_noexec_handler, command, sock, follower)
 }
 
 /// Exit reason for the command executed by sudo.

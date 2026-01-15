@@ -31,9 +31,8 @@ pub(in crate::exec) fn exec_pty(
     spawn_noexec_handler: Option<SpawnNoexecHandler>,
     mut command: Command,
     sock: UnixStream,
-    follower: PtyFollower
+    follower: PtyFollower,
 ) -> io::Result<ExitReason> {
-
     // Create backchannels to communicate with the monitor.
     let mut backchannels = BackchannelPair::new().map_err(|err| {
         dev_error!("cannot create backchannel: {err}");
