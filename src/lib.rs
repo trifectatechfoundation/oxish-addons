@@ -14,15 +14,16 @@ pub mod connection;
 mod key_exchange;
 use key_exchange::KeyExchange;
 pub mod proto;
-use proto::{DecryptingReader, Encode, EncryptingWriter, Packet};
+use proto::{Encode, EncryptingWriter, Packet, ReadState};
 pub mod service;
 
 /// A low level ssh transport layer protocol connection
 pub struct SshTransportConnection {
-    stream_read: DecryptingReader<tcp::OwnedReadHalf>,
+    stream_read: tcp::OwnedReadHalf,
     stream_write: EncryptingWriter<tcp::OwnedWriteHalf>,
     addr: SocketAddr,
     host_key: Arc<Ed25519KeyPair>,
+    read: ReadState,
 }
 
 impl SshTransportConnection {
@@ -40,10 +41,11 @@ impl SshTransportConnection {
         let (stream_read, stream_write) = stream.into_split();
 
         let mut connection = Self {
-            stream_read: DecryptingReader::new(stream_read),
+            stream_read,
             stream_write: EncryptingWriter::new(stream_write),
             addr,
             host_key,
+            read: ReadState::default(),
         };
 
         let mut exchange = digest::Context::new(&digest::SHA256);
@@ -56,7 +58,7 @@ impl SshTransportConnection {
     }
 
     pub(crate) async fn recv_packet(&mut self) -> Result<Packet<'_>, Error> {
-        self.stream_read.read_packet().await
+        self.read.read_packet(&mut self.stream_read).await
     }
 
     pub(crate) async fn send_packet(
@@ -76,13 +78,14 @@ impl VersionExchange {
         exchange: &mut digest::Context,
         conn: &mut SshTransportConnection,
     ) -> Result<KeyExchange, ()> {
-        let ident_bytes = match Identification::read_from_stream(&mut conn.stream_read).await {
-            Ok(ident_bytes) => ident_bytes,
-            Err(error) => {
-                warn!(addr = %conn.addr, %error, "failed to read version exchange");
-                return Err(());
-            }
-        };
+        let ident_bytes =
+            match Identification::read_from_stream(&mut conn.read, &mut conn.stream_read).await {
+                Ok(ident_bytes) => ident_bytes,
+                Err(error) => {
+                    warn!(addr = %conn.addr, %error, "failed to read version exchange");
+                    return Err(());
+                }
+            };
         let ident = match Identification::decode(&ident_bytes) {
             Ok(ident) => {
                 debug!(addr = %conn.addr, ?ident, "received identification");
@@ -144,11 +147,12 @@ impl Identification<'_> {
 impl<'a> Identification<'a> {
     /// Read the identification string as raw bytes with the CRLF stripped off.
     async fn read_from_stream(
-        stream: &mut DecryptingReader<impl AsyncReadExt + Unpin>,
+        read: &mut ReadState,
+        stream: &mut (impl AsyncReadExt + Unpin),
     ) -> Result<Vec<u8>, Error> {
         let mut data = vec![];
         loop {
-            data.push(stream.read_u8_cleartext().await?);
+            data.push(read.read_u8_cleartext(stream).await?);
             if data.len() > 255 {
                 return Err(IdentificationError::TooLong.into());
             }

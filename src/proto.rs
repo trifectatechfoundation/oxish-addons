@@ -1,11 +1,11 @@
-use core::iter;
+use core::{iter, ops::Range};
 use std::io;
 
 use aws_lc_rs::{
     cipher::{StreamingDecryptingKey, StreamingEncryptingKey},
     constant_time, hmac, rand,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tracing::debug;
 
 use crate::Error;
@@ -74,38 +74,45 @@ impl From<u8> for MessageType {
     }
 }
 
-/// A reader which decrypts data on the fly.
+/// The reader and decryption state for an SSH connection.
 // FIXME implement in-place decryption once aws-lc-rs supports this for AES-CTR.
-pub(crate) struct DecryptingReader<R: AsyncReadExt + Unpin> {
-    stream: R,
+pub(crate) struct ReadState {
     buf: Vec<u8>,
     decrypted_buf: Vec<u8>,
     unread_start: usize,
+    needed: usize,
 
-    packet_number: u32,
+    sequence_number: u32,
     pub(crate) decryption_key: Option<(StreamingDecryptingKey, hmac::Key)>,
 }
 
-impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
-    pub(crate) fn new(stream: R) -> Self {
+impl Default for ReadState {
+    fn default() -> Self {
         Self {
-            stream,
             buf: Vec::with_capacity(16_384),
             decrypted_buf: Vec::with_capacity(16_384),
             unread_start: 0,
-            packet_number: 0,
+            needed: 0,
+            sequence_number: 0,
             decryption_key: None,
         }
     }
+}
 
-    async fn ensure_at_least(
-        stream: &mut R,
-        buf: &mut Vec<u8>,
-        unread_start: &mut usize,
-        n: u32,
-    ) -> Result<(), Error> {
-        while buf.len() - *unread_start < n as usize {
-            let read = stream.read_buf(buf).await?;
+impl ReadState {
+    /// Read a single byte without packet structure or encryption.
+    ///
+    /// This should only be used for reading the identification string.
+    pub(crate) async fn read_u8_cleartext(
+        &mut self,
+        stream: &mut (impl AsyncRead + Unpin),
+    ) -> Result<u8, Error> {
+        assert!(self.decryption_key.is_none());
+
+        if self.buf.len() - self.unread_start == 0 {
+            self.unread_start = 0;
+            self.buf.clear();
+            let read = stream.read_buf(&mut self.buf).await?;
             debug!(bytes = read, "read from stream");
             if read == 0 {
                 return Err(Error::Io(io::Error::new(
@@ -114,23 +121,41 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
                 )));
             }
         }
-        Ok(())
-    }
-
-    /// Read a single byte without packet structure or encryption.
-    ///
-    /// This should only be used for reading the identification string.
-    pub(crate) async fn read_u8_cleartext(&mut self) -> Result<u8, Error> {
-        assert!(self.decryption_key.is_none());
-
-        Self::ensure_at_least(&mut self.stream, &mut self.buf, &mut self.unread_start, 1).await?;
 
         let byte = self.buf[self.unread_start];
         self.unread_start += 1;
         Ok(byte)
     }
 
-    pub(crate) async fn read_packet<'a>(&'a mut self) -> Result<Packet<'a>, Error> {
+    pub(crate) async fn read_packet<'a>(
+        &'a mut self,
+        stream: &mut (impl AsyncRead + Unpin),
+    ) -> Result<Packet<'a>, Error> {
+        loop {
+            match self.try_read_packet()? {
+                Some((sequence_number, range)) => {
+                    let Decoded {
+                        value: packet,
+                        next,
+                    } = Packet::decode(
+                        sequence_number,
+                        if self.decryption_key.is_some() {
+                            &self.decrypted_buf[range]
+                        } else {
+                            &self.buf[range]
+                        },
+                    )?;
+                    assert!(next.is_empty());
+
+                    return Ok(packet);
+                }
+                None => self.read_stream(stream).await?,
+            }
+        }
+    }
+
+    // This returns a Range rather than Packet because of a borrowck limitation
+    pub(crate) fn try_read_packet(&mut self) -> Result<Option<(u32, Range<usize>)>, Error> {
         // Compact the internal buffer
         if self.unread_start > 0 {
             self.buf.copy_within(self.unread_start.., 0);
@@ -145,14 +170,11 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
         {
             let block_len = decrypting_key.algorithm().block_len();
 
-            Self::ensure_at_least(
-                &mut self.stream,
-                &mut self.buf,
-                &mut self.unread_start,
-                block_len as u32,
-            )
-            .await?;
-            self.decrypted_buf.resize(block_len, 0);
+            self.needed = block_len;
+            if self.buf.len() < self.needed {
+                return Ok(None);
+            }
+            self.decrypted_buf.resize(self.buf.len() + block_len, 0);
 
             // It is fine to use less_safe_update as we make sure to decrypt whole blocks at a time
             let update = decrypting_key
@@ -166,16 +188,12 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
             } = PacketLength::decode(&self.decrypted_buf[..4])?;
             assert!(next.is_empty());
 
-            Self::ensure_at_least(
-                &mut self.stream,
-                &mut self.buf,
-                &mut self.unread_start,
-                4 + packet_length.inner
-                    + integrity_key.algorithm().digest_algorithm().output_len as u32,
-            )
-            .await?;
-            self.decrypted_buf
-                .resize(4 + packet_length.inner as usize, 0);
+            self.needed = 4
+                + packet_length.inner as usize
+                + integrity_key.algorithm().digest_algorithm().output_len;
+            if self.buf.len() < self.needed {
+                return Ok(None);
+            }
 
             // It is fine to use less_safe_update as we make sure to decrypt whole blocks at a time
             let update = decrypting_key
@@ -189,7 +207,7 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
             let packet_excl_mac = &self.decrypted_buf[..4 + packet_length.inner as usize];
 
             let mut hmac_ctx = hmac::Context::with_key(integrity_key);
-            hmac_ctx.update(&self.packet_number.to_be_bytes());
+            hmac_ctx.update(&self.sequence_number.to_be_bytes());
             hmac_ctx.update(packet_excl_mac);
             let actual_mac = hmac_ctx.sign();
             let expected_mac = &self.buf[4 + packet_length.inner as usize
@@ -204,39 +222,48 @@ impl<R: AsyncReadExt + Unpin> DecryptingReader<R> {
                 integrity_key.algorithm().digest_algorithm().output_len,
             )
         } else {
-            Self::ensure_at_least(&mut self.stream, &mut self.buf, &mut self.unread_start, 4)
-                .await?;
+            self.needed = 4;
+            if self.buf.len() < self.needed {
+                return Ok(None);
+            }
             let Decoded {
                 value: packet_length,
                 next,
             } = PacketLength::decode(&self.buf[..4])?;
             assert!(next.is_empty());
 
-            Self::ensure_at_least(
-                &mut self.stream,
-                &mut self.buf,
-                &mut self.unread_start,
-                4 + packet_length.inner,
-            )
-            .await?;
-
+            self.needed = 4 + packet_length.inner as usize;
+            if self.buf.len() < self.needed {
+                return Ok(None);
+            }
             (&self.buf[..4 + packet_length.inner as usize], 0)
         };
 
         // Note: this needs to be done AFTER the IO to ensure
         // this async function is cancel-safe
-        let packet_number = self.packet_number;
-        self.packet_number = self.packet_number.wrapping_add(1);
-
-        let Decoded {
-            value: packet,
-            next,
-        } = Packet::decode(packet_number, packet_without_mac)?;
-        assert!(next.is_empty());
+        let sequence_number = self.sequence_number;
+        self.sequence_number = self.sequence_number.wrapping_add(1);
 
         self.unread_start = packet_without_mac.len() + mac_len;
 
-        Ok(packet)
+        Ok(Some((sequence_number, 0..packet_without_mac.len())))
+    }
+
+    pub(crate) async fn read_stream(
+        &mut self,
+        stream: &mut (impl AsyncRead + Unpin),
+    ) -> Result<(), Error> {
+        while self.buf.len() < self.needed {
+            let read = stream.read_buf(&mut self.buf).await?;
+            debug!(read, "read from stream");
+            if read == 0 {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "EOF",
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
