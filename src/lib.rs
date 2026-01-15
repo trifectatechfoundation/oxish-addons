@@ -18,7 +18,7 @@ use tokio::{
 use crate::{
     cutils::cerr,
     log::{dev_info, SudoLogger},
-    system::{fork, term::PtyLeader, ForkResult},
+    system::{fork, term::PtyLeader, ForkResult, _exit},
 };
 
 #[macro_use]
@@ -32,7 +32,7 @@ pub(crate) mod exec;
 pub(crate) mod log;
 pub(crate) mod system;
 
-struct AsyncPtyLeader {
+pub struct AsyncPtyLeader {
     fd: AsyncFd<PtyLeader>,
 }
 
@@ -90,32 +90,9 @@ impl AsyncWrite for AsyncPtyLeader {
     }
 }
 
-async fn do_stuff(mut leader: AsyncPtyLeader, mut sock: UnixStream) {
-    // Send the command we want to run to the child process
-    let command = b"/bin/sh";
-    let _ = sock.write(&command.len().to_ne_bytes()).await.unwrap();
-    let _ = sock.write(command).await.unwrap();
-
-    let _ = leader
-        .write(
-            b"touch hello_world.txt\ndate >> hello_world.txt\ncat hello_world.txt\necho \"DONE\"\n",
-        )
-        .await
-        .unwrap();
-
-    let mut buf = vec![0; 1024];
-    // loop forever so we don't exit
-    loop {
-        let read_len = leader.read(&mut buf).await.unwrap();
-        println!(
-            "OUTPUT: {}",
-            String::from_utf8(buf[..read_len].to_vec()).unwrap()
-        );
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    }
-}
-
-pub fn runtime() {
+pub fn run<T, Fut: std::future::Future<Output = T>>(
+    async_process: impl FnOnce(AsyncPtyLeader, tokio::net::UnixStream) -> Fut,
+) -> T {
     use crate::{exec, system::User};
     use std::path::Path;
 
@@ -138,8 +115,8 @@ pub fn runtime() {
                 // Turn the std socket into a tokio socket
                 let sock = UnixStream::from_std(left_sock).unwrap();
 
-                do_stuff(leader, sock).await
-            });
+                async_process(leader, sock).await
+            })
         }
         ForkResult::Child => {
             let mut sock = right_sock;
@@ -179,6 +156,8 @@ pub fn runtime() {
                 follower,
             )
             .unwrap();
+
+            _exit(0);
         }
     }
 }
