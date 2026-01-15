@@ -15,17 +15,19 @@ use oxish::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, UnixStream},
+    sync::Mutex,
 };
 use tracing::{debug, info, warn};
 
 fn main() -> anyhow::Result<()> {
-    process_engine::runtime(async_main)
+    process_engine::run(async_main)
 }
 
 async fn async_main(
     terminal: process_engine::AsyncPtyLeader,
-    cmdsock: UnixStream,
+    sock: UnixStream,
 ) -> anyhow::Result<()> {
+    let cmdsock = Arc::new(Mutex::new((terminal, sock)));
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -79,51 +81,64 @@ async fn async_main(
                 else {
                     continue; // Some kind of error happened. Has been logged already.
                 };
-                ServiceRunner::new(conn, |service_name, packet_sender| {
+                let cmdsock = cmdsock.clone();
+                ServiceRunner::new(conn, move |service_name, packet_sender| {
+                    let cmdsock = cmdsock.clone();
                     if service_name == b"ssh-userauth" {
                         Some(Box::new(AuthService::new(
-                            |service_name, username, packet_sender| {
+                            move |service_name, username, packet_sender| {
                                 debug!(
                                     "Authenticated {} for service {}",
                                     String::from_utf8_lossy(username),
                                     String::from_utf8_lossy(service_name)
                                 );
+                                let cmdsock = cmdsock.clone();
                                 Some(Box::new(ConnectionService::new(
-                                    |channel_type, _type_data, mut channels| {
+                                    move |channel_type, _type_data, mut channels| {
                                         debug!(
                                             "New channel of type {}",
                                             String::from_utf8_lossy(channel_type)
                                         );
+                                        let cmdsock = cmdsock.clone();
                                         tokio::spawn(async move {
-                                            let _ =
-                                                channels.stdout.write_all(b"hello world\r\n").await;
+                                            let (ref mut term, ref mut sock) =
+                                                *cmdsock.lock().await;
+
+                                            let _ = {
+                                                let command = b"/usr/bin/sh";
+                                                let _ = sock
+                                                    .write(&command.len().to_ne_bytes())
+                                                    .await
+                                                    .unwrap();
+
+                                                let _ = sock.write(command).await.unwrap();
+                                            };
+
                                             loop {
-                                                let mut buf = [0; 128];
-                                                let Ok(size) = channels.stdin.read(&mut buf).await
-                                                else {
-                                                    break;
+                                                let mut buf = [0; 1024];
+                                                if let Ok(size) = term.read(&mut buf).await {
+                                                    for c in &buf[..size] {
+                                                        println!("TERM: {}", *c as char);
+                                                    }
+
+                                                    let _ = channels
+                                                        .stdout
+                                                        .write_all(&buf[..size])
+                                                        .await;
+                                                    let _ = channels.stdout.flush().await;
                                                 };
-                                                if size == 0 {
-                                                    break;
-                                                }
-                                                for c in &buf[..size] {
-                                                    match *c {
-                                                        3 => {
+
+                                                if let Ok(size) =
+                                                    channels.stdin.read(&mut buf).await
+                                                {
+                                                    let _ = term.write_all(&buf[..size]).await;
+                                                    for c in &buf[..size] {
+                                                        println!("SSH: {}", *c as char);
+                                                        if *c == 3 {
                                                             // ctrl-c
+                                                            // THERE IS SOMETHING STRANGE GOING ON HERE
                                                             channels.exit_status.send(2).unwrap();
                                                             return;
-                                                        }
-                                                        b'\r' => {
-                                                            let _ = channels
-                                                                .stdout
-                                                                .write_all(b"\r\n")
-                                                                .await;
-                                                        }
-                                                        v => {
-                                                            let _ = channels
-                                                                .stdout
-                                                                .write_all(&[v])
-                                                                .await;
                                                         }
                                                     }
                                                 }
