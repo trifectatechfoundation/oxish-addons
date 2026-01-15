@@ -14,12 +14,18 @@ use oxish::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, UnixStream},
 };
 use tracing::{debug, info, warn};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    process_engine::runtime(async_main)
+}
+
+async fn async_main(
+    terminal: process_engine::AsyncPtyLeader,
+    cmdsock: UnixStream,
+) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
