@@ -16,6 +16,8 @@ tokio = { version = "1.42", features = ["io-util", "macros", "net", "rt-multi-th
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 process_engine = { version = "0.2.11", path = "./exec/" }
+libc = "0.2.180"
+sendfd = { version = "0.4.4", features = ["tokio"] }
 
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
