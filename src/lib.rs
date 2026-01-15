@@ -90,7 +90,7 @@ impl AsyncWrite for AsyncPtyLeader {
     }
 }
 
-pub fn telnet() {
+pub fn runtime() {
     use crate::{exec, system::User};
     use std::path::Path;
 
