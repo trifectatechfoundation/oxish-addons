@@ -1,3 +1,4 @@
+#![allow(unused)]
 use std::{
     ffi::OsStr,
     io::{Read, Write},
