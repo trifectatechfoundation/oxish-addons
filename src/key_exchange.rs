@@ -26,7 +26,7 @@ impl EcdhKeyExchange {
         mut exchange: digest::Context,
         conn: &mut SshTransportConnection,
     ) -> Result<(), ()> {
-        let packet = match conn.stream_read.read_packet().await {
+        let packet = match conn.read.read_packet(&mut conn.stream_read).await {
             Ok(packet) => packet,
             Err(error) => {
                 warn!(addr = %conn.addr, %error, "failed to read packet");
@@ -113,7 +113,7 @@ impl EcdhKeyExchange {
             return Err(());
         }
 
-        let packet = match conn.stream_read.read_packet().await {
+        let packet = match conn.read.read_packet(&mut conn.stream_read).await {
             Ok(packet) => packet,
             Err(error) => {
                 warn!(addr = %conn.addr, %error, "failed to read packet");
@@ -176,7 +176,7 @@ impl EcdhKeyExchange {
             server_to_client: RawKeys::server_to_client(&derivation),
         };
 
-        conn.stream_read.decryption_key = Some((
+        conn.read.decryption_key = Some((
             StreamingDecryptingKey::ctr(
                 UnboundCipherKey::new(
                     &AES_128,
@@ -320,7 +320,7 @@ impl KeyExchange {
         exchange: &mut digest::Context,
         conn: &mut SshTransportConnection,
     ) -> Result<EcdhKeyExchange, ()> {
-        let packet = match conn.stream_read.read_packet().await {
+        let packet = match conn.read.read_packet(&mut conn.stream_read).await {
             Ok(packet) => packet,
             Err(error) => {
                 warn!(addr = %conn.addr, %error, "failed to read packet");
