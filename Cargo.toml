@@ -12,7 +12,6 @@ default-run = "simulator"
 
 [dependencies]
 libc = "0.2.176"
-tokio = { version = "1.47.3", features = ["io-util", "net", "rt", "rt-multi-thread", "time"] }
 
 [features]
 default = []

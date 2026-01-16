@@ -30,8 +30,8 @@ pub(in crate::exec) fn exec_pty(
     sudo_pid: ProcessId,
     spawn_noexec_handler: Option<SpawnNoexecHandler>,
     mut command: Command,
-    sock: UnixStream,
-    follower: PtyFollower,
+    pty: Pty,
+    socket: UnixStream,
 ) -> io::Result<ExitReason> {
     // Create backchannels to communicate with the monitor.
     let mut backchannels = BackchannelPair::new().map_err(|err| {
@@ -58,7 +58,7 @@ pub(in crate::exec) fn exec_pty(
 
     // Set all the IO streams for the command to the follower side of the pty.
     let clone_follower = || -> io::Result<PtyFollower> {
-        follower.try_clone().map_err(|err| {
+        pty.follower.try_clone().map_err(|err| {
             dev_error!("cannot clone pty follower: {err}");
             err
         })
@@ -71,13 +71,13 @@ pub(in crate::exec) fn exec_pty(
     let mut registry = EventRegistry::<ParentClosure>::new();
 
     // Pipe data between both terminals
-    // let mut tty_pipe = Pipe::new(
-    //     sock,
-    //     pty.leader,
-    //     &mut registry,
-    //     ParentEvent::Tty,
-    //     ParentEvent::Pty,
-    // );
+    let mut tty_pipe = Pipe::new(
+        socket,
+        pty.leader,
+        &mut registry,
+        ParentEvent::Tty,
+        ParentEvent::Pty,
+    );
 
     // let user_tty = tty_pipe.left_mut();
 
@@ -180,12 +180,12 @@ pub(in crate::exec) fn exec_pty(
     })?
     else {
         // Close the file descriptors that we don't access
-        // drop(tty_pipe);
+        drop(tty_pipe);
         drop(backchannels.parent);
 
         // If `exec_monitor` returns, it means we failed to execute the command somehow.
         match exec_monitor(
-            follower,
+            pty.follower,
             command,
             foreground && !exec_bg,
             &mut backchannels.monitor,
@@ -232,7 +232,7 @@ pub(in crate::exec) fn exec_pty(
         sudo_pid,
         parent_pgrp,
         backchannels.parent,
-        // tty_pipe,
+        tty_pipe,
         // tty_size,
         foreground,
         term_raw,
@@ -300,7 +300,7 @@ struct ParentClosure {
     sudo_pid: ProcessId,
     parent_pgrp: ProcessId,
     command_pid: Option<ProcessId>,
-    // tty_pipe: Pipe<UnixStream, PtyLeader>,
+    tty_pipe: Pipe<UnixStream, PtyLeader>,
     // tty_size: TermSize,
     foreground: bool,
     term_raw: bool,
@@ -324,7 +324,7 @@ impl ParentClosure {
         sudo_pid: ProcessId,
         parent_pgrp: ProcessId,
         mut backchannel: ParentBackchannel,
-        // tty_pipe: Pipe<UnixStream, PtyLeader>,
+        tty_pipe: Pipe<UnixStream, PtyLeader>,
         // tty_size: TermSize,
         foreground: bool,
         term_raw: bool,
@@ -352,7 +352,7 @@ impl ParentClosure {
             sudo_pid,
             parent_pgrp,
             command_pid: None,
-            // tty_pipe,
+            tty_pipe,
             // tty_size,
             foreground,
             term_raw,
@@ -433,7 +433,7 @@ impl ParentClosure {
                                     self.schedule_signal(signal, registry);
                                 }
 
-                                // self.tty_pipe.resume_events(registry);
+                                self.tty_pipe.resume_events(registry);
                             }
                         }
                     }
@@ -744,10 +744,10 @@ impl Process for ParentClosure {
                 // } else {
                 //     self.tty_pipe.on_left_event(poll_event, registry).ok();
                 // }
-                // self.tty_pipe.on_left_event(poll_event, registry).ok();
+                self.tty_pipe.on_left_event(poll_event, registry).ok();
             }
             ParentEvent::Pty(poll_event) => {
-                // self.tty_pipe.on_right_event(poll_event, registry).ok();
+                self.tty_pipe.on_right_event(poll_event, registry).ok();
             }
             ParentEvent::Backchannel(poll_event) => match poll_event {
                 PollEvent::Readable => self.on_message_received(registry),

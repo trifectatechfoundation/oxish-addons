@@ -30,7 +30,7 @@ use crate::{
         interface::ProcessId,
         kill, killpg, mark_fds_as_cloexec, set_target_user,
         signal::{consts::*, signal_name, SignalNumber, SignalSet},
-        term::{PtyFollower, TermSize, Terminal, UserTerm},
+        term::{Pty, PtyFollower, TermSize, Terminal, UserTerm},
         wait::{Wait, WaitError, WaitOptions},
     },
 };
@@ -85,8 +85,8 @@ pub struct RunOptions<'a> {
 pub fn run_command(
     options: RunOptions<'_>,
     env: impl IntoIterator<Item = (impl AsRef<OsStr>, impl AsRef<OsStr>)>,
-    sock: UnixStream,
-    follower: PtyFollower,
+    pty: Pty,
+    socket: UnixStream,
 ) -> io::Result<ExitReason> {
     // FIXME: should we pipe the stdio streams?
     let qualified_path = options.command;
@@ -182,9 +182,7 @@ pub fn run_command(
 
     let sudo_pid = ProcessId::new(std::process::id() as i32);
 
-    // let user_tty = UserTerm::open().unwrap();
-
-    exec_pty(sudo_pid, spawn_noexec_handler, command, sock, follower)
+    exec_pty(sudo_pid, spawn_noexec_handler, command, pty, socket)
 }
 
 /// Exit reason for the command executed by sudo.
