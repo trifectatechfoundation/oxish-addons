@@ -1,90 +1,202 @@
-use core::{iter, net::SocketAddr, ops::Deref};
+use core::{iter, ops::Deref};
+use std::io;
 
-use aws_lc_rs::{digest, rand};
+use aws_lc_rs::{cipher::StreamingDecryptingKey, constant_time, digest, hmac, rand};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tracing::{debug, error};
+use tracing::debug;
 
 use crate::Error;
 
+/// The reader and decryption state for an SSH connection.
+// FIXME implement in-place decryption once aws-lc-rs supports this for AES-CTR.
 pub(crate) struct ReadState {
-    pub(crate) buf: Vec<u8>,
-}
+    buf: Vec<u8>,
+    decrypted_buf: Vec<u8>,
+    unread_start: usize,
+    needed: usize,
 
-impl ReadState {
-    pub(crate) async fn packet<'a, T: TryFrom<Packet<'a>, Error = Error> + 'a>(
-        &'a mut self,
-        stream: &mut (impl AsyncRead + Unpin),
-        addr: SocketAddr,
-    ) -> Result<Packeted<'a, T>, Error> {
-        let (packet, rest) = match read::<Packet<'_>>(stream, &mut self.buf).await {
-            Ok(Decoded {
-                value: packet,
-                next,
-            }) => (packet, next.len()),
-            Err(error) => {
-                error!(%addr, %error, "failed to read packet");
-                return Err(error);
-            }
-        };
-
-        let payload = packet.payload;
-        match T::try_from(packet) {
-            Ok(decoded) => Ok(Packeted {
-                payload,
-                decoded,
-                rest,
-            }),
-            Err(error) => {
-                error!(%addr, %error, "failed to parse packet");
-                Err(error)
-            }
-        }
-    }
-
-    pub(crate) fn truncate(&mut self, rest: usize) {
-        if rest > 0 {
-            let start = self.buf.len() - rest;
-            self.buf.copy_within(start.., 0);
-        }
-        self.buf.truncate(rest);
-    }
+    sequence_number: u32,
+    pub(crate) decryption_key: Option<(StreamingDecryptingKey, hmac::Key)>,
 }
 
 impl Default for ReadState {
     fn default() -> Self {
         Self {
             buf: Vec::with_capacity(16_384),
+            decrypted_buf: Vec::with_capacity(16_384),
+            unread_start: 0,
+            needed: 0,
+            sequence_number: 0,
+            decryption_key: None,
         }
     }
 }
 
-pub(crate) struct Packeted<'a, T: 'a> {
-    payload: &'a [u8],
-    decoded: T,
-    rest: usize,
-}
-
-impl<'a, T> Packeted<'a, T> {
-    pub(crate) fn hash(self, hash: &mut HandshakeHash) -> (T, usize) {
-        let Self {
-            payload,
-            decoded,
-            rest,
-        } = self;
-        hash.prefixed(payload);
-        (decoded, rest)
+impl ReadState {
+    pub(crate) async fn read_packet<'a>(
+        &'a mut self,
+        stream: &mut (impl AsyncRead + Unpin),
+    ) -> Result<Packet<'a>, Error> {
+        loop {
+            match self.poll_packet()? {
+                Some((sequence_number, packet_length)) => {
+                    return self.decode_packet(sequence_number, packet_length);
+                }
+                None => {
+                    let read = stream.read_buf(&mut self.incoming_buf()).await?;
+                    debug!(read, "read from stream");
+                    if read == 0 {
+                        return Err(Error::Io(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "EOF",
+                        )));
+                    }
+                }
+            }
+        }
     }
 
-    pub(crate) fn into_inner(self) -> T {
-        self.decoded
+    // This and decode_packet are split because of a borrowck limitation.
+    pub(crate) fn poll_packet(&mut self) -> Result<Option<(u32, PacketLength)>, Error> {
+        // Compact the internal buffer
+        if self.unread_start > 0 {
+            debug_assert!(self.needed == 0);
+            self.buf.copy_within(self.unread_start.., 0);
+            self.buf.truncate(self.buf.len() - self.unread_start);
+            self.unread_start = 0;
+            self.decrypted_buf.clear();
+        }
+
+        if self.buf.len() < self.needed {
+            return Ok(None);
+        }
+
+        let (packet_length, mac_len) = if let Some((decrypting_key, integrity_key)) =
+            &mut self.decryption_key
+        // comment to prevent rustfmt indenting the entire if
+        {
+            let block_len = decrypting_key.algorithm().block_len();
+
+            self.needed = block_len;
+            if self.buf.len() < self.needed {
+                return Ok(None);
+            }
+            self.decrypted_buf.resize(self.buf.len() + block_len, 0);
+
+            // It is fine to use less_safe_update as we make sure to decrypt whole blocks at a time
+            let update = decrypting_key
+                .less_safe_update(&self.buf[..block_len], &mut self.decrypted_buf[..block_len])
+                .unwrap();
+            assert_eq!(update.remainder().len(), 0);
+
+            let Decoded {
+                value: packet_length,
+                next,
+            } = PacketLength::decode(&self.decrypted_buf[..4])?;
+            assert!(next.is_empty());
+
+            self.needed = 4
+                + packet_length.inner as usize
+                + integrity_key.algorithm().digest_algorithm().output_len;
+            if self.buf.len() < self.needed {
+                return Ok(None);
+            }
+
+            // It is fine to use less_safe_update as we make sure to decrypt whole blocks at a time
+            let update = decrypting_key
+                .less_safe_update(
+                    &self.buf[block_len..4 + packet_length.inner as usize],
+                    &mut self.decrypted_buf[block_len..4 + packet_length.inner as usize],
+                )
+                .unwrap();
+            assert_eq!(update.remainder().len(), 0);
+
+            let packet_excl_mac = &self.decrypted_buf[..4 + packet_length.inner as usize];
+
+            let mut hmac_ctx = hmac::Context::with_key(integrity_key);
+            hmac_ctx.update(&self.sequence_number.to_be_bytes());
+            hmac_ctx.update(packet_excl_mac);
+            let actual_mac = hmac_ctx.sign();
+            let expected_mac = &self.buf[4 + packet_length.inner as usize
+                ..4 + packet_length.inner as usize
+                    + integrity_key.algorithm().digest_algorithm().output_len];
+            if constant_time::verify_slices_are_equal(actual_mac.as_ref(), expected_mac).is_err() {
+                return Err(Error::InvalidMac);
+            }
+
+            (
+                packet_length,
+                integrity_key.algorithm().digest_algorithm().output_len,
+            )
+        } else {
+            self.needed = 4;
+            if self.buf.len() < self.needed {
+                return Ok(None);
+            }
+            let Decoded {
+                value: packet_length,
+                next,
+            } = PacketLength::decode(&self.buf[..4])?;
+            assert!(next.is_empty());
+
+            self.needed = 4 + packet_length.inner as usize;
+            if self.buf.len() < self.needed {
+                return Ok(None);
+            }
+
+            self.decrypted_buf.clear();
+            self.decrypted_buf
+                .extend_from_slice(&self.buf[..4 + packet_length.inner as usize]);
+
+            (packet_length, 0)
+        };
+
+        // Note: this needs to be done AFTER the IO to ensure
+        // this async function is cancel-safe
+        let sequence_number = self.sequence_number;
+        self.sequence_number = self.sequence_number.wrapping_add(1);
+
+        self.unread_start = 4 + packet_length.inner as usize + mac_len;
+        self.needed = 0;
+
+        Ok(Some((sequence_number, packet_length)))
     }
-}
 
-impl<T> Deref for Packeted<'_, T> {
-    type Target = T;
+    pub(crate) fn decode_packet<'a>(
+        &'a self,
+        _sequence_number: u32,
+        packet_length: PacketLength,
+    ) -> Result<Packet<'a>, Error> {
+        let Decoded {
+            value: padding_length,
+            next,
+        } = PaddingLength::decode(&self.decrypted_buf[4..4 + packet_length.inner as usize])?;
 
-    fn deref(&self) -> &Self::Target {
-        &self.decoded
+        let payload_len = (packet_length.inner - 1 - padding_length.inner as u32) as usize;
+        let Some(payload) = next.get(..payload_len) else {
+            return Err(Error::Incomplete(Some(payload_len - next.len())));
+        };
+
+        let Some(next) = next.get(payload_len..) else {
+            return Err(Error::Unreachable(
+                "unable to extract rest after fixed-length slice",
+            ));
+        };
+
+        let Some(_) = next.get(..padding_length.inner as usize) else {
+            return Err(Error::Incomplete(Some(
+                padding_length.inner as usize - next.len(),
+            )));
+        };
+
+        Ok(Packet { payload })
+    }
+
+    /// The buffer to read data into.
+    ///
+    /// You may not touch existing data and must only append new data at the end.
+    pub(crate) fn incoming_buf(&mut self) -> &mut Vec<u8> {
+        &mut self.buf
     }
 }
 
@@ -185,48 +297,6 @@ impl Packet<'_> {
     }
 }
 
-impl<'a> Decode<'a> for Packet<'a> {
-    fn decode(bytes: &'a [u8]) -> Result<Decoded<'a, Self>, Error> {
-        let Decoded {
-            value: packet_length,
-            next,
-        } = PacketLength::decode(bytes)?;
-
-        let Decoded {
-            value: padding_length,
-            next,
-        } = PaddingLength::decode(next)?;
-
-        let payload_len = (packet_length.inner - 1 - padding_length.inner as u32) as usize;
-        let Some(payload) = next.get(..payload_len) else {
-            return Err(Error::Incomplete(Some(payload_len - next.len())));
-        };
-
-        let Some(next) = next.get(payload_len..) else {
-            return Err(Error::Unreachable(
-                "unable to extract rest after fixed-length slice",
-            ));
-        };
-
-        let Some(_) = next.get(..padding_length.inner as usize) else {
-            return Err(Error::Incomplete(Some(
-                padding_length.inner as usize - next.len(),
-            )));
-        };
-
-        let Some(next) = next.get(padding_length.inner as usize..) else {
-            return Err(Error::Unreachable("unable to extract rest after padding"));
-        };
-
-        // No MAC support yet
-
-        Ok(Decoded {
-            value: Self { payload },
-            next,
-        })
-    }
-}
-
 pub(crate) struct PacketBuilder<'a> {
     buf: &'a mut Vec<u8>,
     start: usize,
@@ -315,7 +385,7 @@ impl Deref for OutgoingPacket<'_> {
 }
 
 #[derive(Debug)]
-struct PacketLength {
+pub(crate) struct PacketLength {
     inner: u32,
 }
 
@@ -425,15 +495,6 @@ impl<'a> Decode<'a> for u8 {
 
 pub(crate) trait Encode {
     fn encode(&self, buf: &mut Vec<u8>);
-}
-
-pub(crate) async fn read<'a, T: Decode<'a>>(
-    reader: &mut (impl AsyncRead + Unpin),
-    buf: &'a mut Vec<u8>,
-) -> Result<Decoded<'a, T>, Error> {
-    let read = reader.read_buf(buf).await?;
-    debug!(bytes = read, "read from stream");
-    T::decode(buf)
 }
 
 pub(crate) trait Decode<'a>: Sized {

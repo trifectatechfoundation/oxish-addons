@@ -53,13 +53,18 @@ impl Connection {
             return;
         };
 
-        let future = self
-            .read
-            .packet::<KeyExchangeInit<'_>>(&mut self.stream, self.addr);
-        let (peer_key_exchange_init, rest) = match future.await {
-            Ok(packeted) => packeted.hash(&mut exchange),
+        let packet = match self.read.read_packet(&mut self.stream).await {
+            Ok(packet) => packet,
             Err(error) => {
-                error!(addr = %self.addr, %error, "failed to read key exchange init");
+                warn!(addr = %self.addr, %error, "failed to read packet");
+                return;
+            }
+        };
+        exchange.prefixed(packet.payload);
+        let peer_key_exchange_init = match KeyExchangeInit::try_from(packet) {
+            Ok(key_exchange_init) => key_exchange_init,
+            Err(error) => {
+                warn!(addr = %self.addr, %error, "failed to read key exchange init");
                 return;
             }
         };
@@ -81,14 +86,15 @@ impl Connection {
             return;
         }
 
-        self.read.truncate(rest);
-
-        let future = self
-            .read
-            .packet::<EcdhKeyExchangeInit<'_>>(&mut self.stream, self.addr);
-        let ecdh_key_exchange_init = match future.await {
-            Ok(packet) => packet.into_inner(),
-            Err(_) => return,
+        let packet = match self.read.read_packet(&mut self.stream).await {
+            Ok(packet) => packet,
+            Err(error) => {
+                warn!(addr = %self.addr, %error, "failed to read packet");
+                return;
+            }
+        };
+        let Ok(ecdh_key_exchange_init) = EcdhKeyExchangeInit::try_from(packet) else {
+            return;
         };
 
         self.write_buf.clear();
@@ -213,7 +219,7 @@ impl<'a> Identification<'a> {
         debug!(bytes = ident.len(), "read from stream");
 
         // Give all data we read but isn't part of the identification string to the ReadState.
-        read.buf.extend(buf);
+        read.incoming_buf().extend(buf);
 
         Ok(ident)
     }
@@ -272,6 +278,8 @@ enum Error {
     InvalidPacket(&'static str),
     #[error("no common {0} algorithms")]
     NoCommonAlgorithm(&'static str),
+    #[error("invalid mac for packet")]
+    InvalidMac,
     #[error("unreachable code: {0}")]
     Unreachable(&'static str),
 }
