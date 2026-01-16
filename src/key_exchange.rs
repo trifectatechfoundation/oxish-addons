@@ -1,4 +1,4 @@
-use std::{io::Write, str};
+use std::{io::Write, str, sync::Arc};
 
 use aws_lc_rs::{
     agreement::{self, EphemeralPrivateKey, UnparsedPublicKey, X25519},
@@ -166,11 +166,10 @@ impl EcdhKeyExchange {
         }
 
         // The first exchange hash is used as session id.
-        let session_id = self.session_id.as_ref().unwrap_or(&exchange_hash);
         let derivation = KeyDerivation {
             shared_secret,
             exchange_hash,
-            session_id,
+            session_id: Arc::new(self.session_id.unwrap_or(exchange_hash)),
         };
         let raw_keys = RawKeySet {
             client_to_server: RawKeys::client_to_server(&derivation),
@@ -181,19 +180,17 @@ impl EcdhKeyExchange {
             StreamingDecryptingKey::ctr(
                 UnboundCipherKey::new(
                     &AES_128,
-                    &raw_keys.client_to_server.encryption_key.as_ref()[..16],
+                    &raw_keys.client_to_server.encryption_key.derive::<16>(),
                 )
                 .unwrap(),
                 aws_lc_rs::cipher::DecryptionContext::Iv128(
-                    raw_keys.client_to_server.initial_iv.as_ref()[..16]
-                        .try_into()
-                        .unwrap(),
+                    raw_keys.client_to_server.initial_iv.derive::<16>().into(),
                 ),
             )
             .unwrap(),
             hmac::Key::new(
                 hmac::HMAC_SHA256,
-                &raw_keys.client_to_server.integrity_key.as_ref()[..32],
+                &raw_keys.client_to_server.integrity_key.derive::<32>(),
             ),
         ));
 
@@ -201,19 +198,17 @@ impl EcdhKeyExchange {
             StreamingEncryptingKey::less_safe_ctr(
                 UnboundCipherKey::new(
                     &AES_128,
-                    &raw_keys.server_to_client.encryption_key.as_ref()[..16],
+                    &raw_keys.server_to_client.encryption_key.derive::<16>(),
                 )
                 .unwrap(),
                 aws_lc_rs::cipher::EncryptionContext::Iv128(
-                    raw_keys.server_to_client.initial_iv.as_ref()[..16]
-                        .try_into()
-                        .unwrap(),
+                    raw_keys.server_to_client.initial_iv.derive::<16>().into(),
                 ),
             )
             .unwrap(),
             hmac::Key::new(
                 hmac::HMAC_SHA256,
-                &raw_keys.server_to_client.integrity_key.as_ref()[..32],
+                &raw_keys.server_to_client.integrity_key.derive::<32>(),
             ),
         );
 
@@ -637,43 +632,82 @@ struct RawKeySet {
 }
 
 struct RawKeys {
-    initial_iv: digest::Digest,
-    encryption_key: digest::Digest,
-    integrity_key: digest::Digest,
+    initial_iv: Key,
+    encryption_key: Key,
+    integrity_key: Key,
 }
 
 impl RawKeys {
-    fn client_to_server(derivation: &KeyDerivation<'_>) -> Self {
+    fn client_to_server(derivation: &KeyDerivation) -> Self {
         Self {
-            initial_iv: derivation.derive(KeyInput::InitialIvClientToServer),
-            encryption_key: derivation.derive(KeyInput::EncryptionKeyClientToServer),
-            integrity_key: derivation.derive(KeyInput::IntegrityKeyClientToServer),
+            initial_iv: derivation.key(KeyInput::InitialIvClientToServer),
+            encryption_key: derivation.key(KeyInput::EncryptionKeyClientToServer),
+            integrity_key: derivation.key(KeyInput::IntegrityKeyClientToServer),
         }
     }
 
-    fn server_to_client(derivation: &KeyDerivation<'_>) -> Self {
+    fn server_to_client(derivation: &KeyDerivation) -> Self {
         Self {
-            initial_iv: derivation.derive(KeyInput::InitialIvServerToClient),
-            encryption_key: derivation.derive(KeyInput::EncryptionKeyServerToClient),
-            integrity_key: derivation.derive(KeyInput::IntegrityKeyServerToClient),
+            initial_iv: derivation.key(KeyInput::InitialIvServerToClient),
+            encryption_key: derivation.key(KeyInput::EncryptionKeyServerToClient),
+            integrity_key: derivation.key(KeyInput::IntegrityKeyServerToClient),
         }
     }
 }
 
-struct KeyDerivation<'a> {
+struct KeyDerivation {
     shared_secret: Vec<u8>,
     exchange_hash: digest::Digest,
-    session_id: &'a digest::Digest,
+    session_id: Arc<digest::Digest>,
 }
 
-impl KeyDerivation<'_> {
-    fn derive(&self, input: KeyInput) -> digest::Digest {
-        let mut context = digest::Context::new(&digest::SHA256);
-        with_mpint_bytes(&self.shared_secret, |bytes| context.update(bytes));
-        context.update(self.exchange_hash.as_ref());
-        context.update(&[u8::from(input)]);
-        context.update(self.session_id.as_ref());
-        context.finish()
+impl KeyDerivation {
+    fn key(&self, input: KeyInput) -> Key {
+        let mut base = digest::Context::new(&digest::SHA256);
+        with_mpint_bytes(&self.shared_secret, |bytes| base.update(bytes));
+        base.update(self.exchange_hash.as_ref());
+
+        Key {
+            base,
+            session_id: self.session_id.clone(),
+            input,
+        }
+    }
+}
+
+struct Key {
+    base: digest::Context,
+    session_id: Arc<digest::Digest>,
+    input: KeyInput,
+}
+
+impl Key {
+    fn derive<const N: usize>(self) -> [u8; N] {
+        let block_len = digest::SHA256.output_len();
+
+        let mut key = [0; N];
+
+        if block_len < N {
+            let mut context = self.base.clone();
+            context.update(&[u8::from(self.input)]);
+            context.update((*self.session_id).as_ref());
+            key[0..block_len].copy_from_slice(context.finish().as_ref());
+
+            let mut i = block_len;
+            while i < 64 {
+                let mut context = self.base.clone();
+                context.update(&key[..i]);
+                key[i..i + block_len].copy_from_slice(context.finish().as_ref());
+                i += block_len;
+            }
+        } else {
+            let mut context = self.base;
+            context.update(&[u8::from(self.input)]);
+            context.update((*self.session_id).as_ref());
+            key[..N].copy_from_slice(&context.finish().as_ref()[..N]);
+        }
+
+        key
     }
 }
 
