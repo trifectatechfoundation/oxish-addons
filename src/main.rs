@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(
-    terminal: process_engine::AsyncPtyLeader,
+    terminal: tokio::fs::File,
     sock: UnixStream,
 ) -> anyhow::Result<()> {
     let cmdsock = Arc::new(Mutex::new((terminal, sock)));
