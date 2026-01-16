@@ -100,33 +100,6 @@ impl Default for ReadState {
 }
 
 impl ReadState {
-    /// Read a single byte without packet structure or encryption.
-    ///
-    /// This should only be used for reading the identification string.
-    pub(crate) async fn read_u8_cleartext(
-        &mut self,
-        stream: &mut (impl AsyncRead + Unpin),
-    ) -> Result<u8, Error> {
-        assert!(self.decryption_key.is_none());
-
-        if self.buf.len() - self.unread_start == 0 {
-            self.unread_start = 0;
-            self.buf.clear();
-            let read = stream.read_buf(&mut self.buf).await?;
-            debug!(bytes = read, "read from stream");
-            if read == 0 {
-                return Err(Error::Io(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "EOF",
-                )));
-            }
-        }
-
-        let byte = self.buf[self.unread_start];
-        self.unread_start += 1;
-        Ok(byte)
-    }
-
     pub(crate) async fn read_packet<'a>(
         &'a mut self,
         stream: &mut (impl AsyncRead + Unpin),

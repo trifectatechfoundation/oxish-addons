@@ -150,20 +150,31 @@ impl<'a> Identification<'a> {
         read: &mut ReadState,
         stream: &mut (impl AsyncReadExt + Unpin),
     ) -> Result<Vec<u8>, Error> {
-        let mut data = vec![];
+        let mut buf = Vec::with_capacity(256);
+        let mut ident = vec![];
         loop {
-            data.push(read.read_u8_cleartext(stream).await?);
-            if data.len() > 255 {
+            if buf.is_empty() && stream.read_buf(&mut buf).await? == 0 {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "EOF",
+                )));
+            }
+            ident.push(buf.remove(0));
+            if ident.len() > 255 {
                 return Err(IdentificationError::TooLong.into());
             }
-            if let Some((_, b"\r\n")) = data.split_last_chunk::<2>() {
-                data.pop().unwrap();
-                data.pop().unwrap();
+            if let Some((_, b"\r\n")) = ident.split_last_chunk::<2>() {
+                ident.pop().unwrap();
+                ident.pop().unwrap();
                 break;
             }
         }
-        debug!(bytes = data.len(), "read from stream");
-        Ok(data)
+        debug!(bytes = ident.len(), "read from stream");
+
+        // Give all data we read but isn't part of the identification string to the ReadState.
+        read.incoming_buf().extend(buf);
+
+        Ok(ident)
     }
 
     fn decode(bytes: &'a [u8]) -> Result<Self, Error> {
