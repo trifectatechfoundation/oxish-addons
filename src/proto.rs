@@ -11,12 +11,12 @@ pub(crate) struct ReadState {
 }
 
 impl ReadState {
-    pub(crate) async fn packet<'a, T: TryFrom<Packet<'a>, Error = Error> + 'a>(
+    pub(crate) async fn packet<'a, T: TryFrom<IncomingPacket<'a>, Error = Error> + 'a>(
         &'a mut self,
         stream: &mut (impl AsyncRead + Unpin),
         addr: SocketAddr,
     ) -> Result<Packeted<'a, T>, Error> {
-        let (packet, rest) = match read::<Packet<'_>>(stream, &mut self.buf).await {
+        let (packet, rest) = match read::<IncomingPacket<'_>>(stream, &mut self.buf).await {
             Ok(Decoded {
                 value: packet,
                 next,
@@ -172,13 +172,21 @@ impl From<u8> for MessageType {
     }
 }
 
-pub(crate) struct Packet<'a> {
+pub(crate) struct IncomingPacket<'a> {
     #[expect(unused)]
     pub(crate) sequence_number: u32,
     pub(crate) payload: &'a [u8],
 }
 
-impl Packet<'_> {
+#[expect(unused)]
+pub(crate) struct OutgoingPacket<'a> {
+    pub(crate) payload: &'a [u8],
+}
+
+impl OutgoingPacketOld<'_> {
+    // FIXME: This is still not a very logically functioning builder. Fixing this
+    // however is quite deeply intertwined with the changes needed for decryption
+    // and encryption and should be done in those PRs.
     pub(crate) fn builder(buf: &mut Vec<u8>) -> PacketBuilder<'_> {
         let start = buf.len();
         buf.extend_from_slice(&[0, 0, 0, 0]); // packet_length
@@ -187,7 +195,7 @@ impl Packet<'_> {
     }
 }
 
-impl<'a> Decode<'a> for Packet<'a> {
+impl<'a> Decode<'a> for IncomingPacket<'a> {
     fn decode(bytes: &'a [u8]) -> Result<Decoded<'a, Self>, Error> {
         let Decoded {
             value: packet_length,
@@ -258,7 +266,7 @@ impl<'a> PacketBuilderWithPayload<'a> {
             .ok_or(Error::Unreachable("unable to extract packet"))
     }
 
-    pub(crate) fn without_mac(self) -> Result<OutgoingPacket<'a>, Error> {
+    pub(crate) fn without_mac(self) -> Result<OutgoingPacketOld<'a>, Error> {
         let Self { buf, start } = self;
 
         // <https://www.rfc-editor.org/rfc/rfc4253#section-6>
@@ -303,16 +311,19 @@ impl<'a> PacketBuilderWithPayload<'a> {
         }
 
         match buf.get(start..) {
-            Some(packet) => Ok(OutgoingPacket(packet)),
+            Some(packet) => Ok(OutgoingPacketOld(packet)),
             None => Err(Error::Unreachable("unable to extract packet")),
         }
     }
 }
 
+// FIXME: This type is currently needed for the key exchange code. However, once packet
+// handling is reworked to support encryption/decryption this loses a lot of its value
+// and should be eliminated.
 #[must_use]
-pub(crate) struct OutgoingPacket<'a>(&'a [u8]);
+pub(crate) struct OutgoingPacketOld<'a>(&'a [u8]);
 
-impl Deref for OutgoingPacket<'_> {
+impl Deref for OutgoingPacketOld<'_> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {

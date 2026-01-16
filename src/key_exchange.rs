@@ -10,8 +10,8 @@ use tracing::{debug, error, warn};
 
 use crate::{
     proto::{
-        with_mpint_bytes, Decode, Decoded, Encode, HandshakeHash, MessageType, OutgoingPacket,
-        Packet,
+        with_mpint_bytes, Decode, Decoded, Encode, HandshakeHash, IncomingPacket, MessageType,
+        OutgoingPacketOld,
     },
     ConnectionContext, Error,
 };
@@ -27,7 +27,7 @@ impl EcdhKeyExchange {
         ecdh_key_exchange_init: EcdhKeyExchangeInit<'_>,
         mut exchange: HandshakeHash,
         conn: &'out mut ConnectionContext<'out>,
-    ) -> Result<(OutgoingPacket<'out>, RawKeySet), ()> {
+    ) -> Result<(OutgoingPacketOld<'out>, RawKeySet), ()> {
         // Write the server's public host key (`K_S`) to the exchange hash
 
         let mut host_key_buf = Vec::with_capacity(128);
@@ -83,7 +83,7 @@ impl EcdhKeyExchange {
             },
         };
 
-        let result = Packet::builder(conn.write_buf)
+        let result = OutgoingPacketOld::builder(conn.write_buf)
             .with_payload(&key_exchange_reply)
             .without_mac();
         let Ok(outgoing) = result else {
@@ -116,10 +116,10 @@ pub(crate) struct EcdhKeyExchangeInit<'a> {
     client_ephemeral_public_key: &'a [u8],
 }
 
-impl<'a> TryFrom<Packet<'a>> for EcdhKeyExchangeInit<'a> {
+impl<'a> TryFrom<IncomingPacket<'a>> for EcdhKeyExchangeInit<'a> {
     type Error = Error;
 
-    fn try_from(packet: Packet<'a>) -> Result<Self, Error> {
+    fn try_from(packet: IncomingPacket<'a>) -> Result<Self, Error> {
         let Decoded {
             value: r#type,
             next,
@@ -210,7 +210,7 @@ impl KeyExchange {
         peer_key_exchange_init: KeyExchangeInit<'_>,
         exchange: &mut HandshakeHash,
         conn: &'out mut ConnectionContext<'out>,
-    ) -> Result<(OutgoingPacket<'out>, EcdhKeyExchange), ()> {
+    ) -> Result<(OutgoingPacketOld<'out>, EcdhKeyExchange), ()> {
         let key_exchange_init = match KeyExchangeInit::new() {
             Ok(kex_init) => kex_init,
             Err(error) => {
@@ -220,7 +220,7 @@ impl KeyExchange {
         };
 
         conn.write_buf.clear();
-        let builder = Packet::builder(conn.write_buf).with_payload(&key_exchange_init);
+        let builder = OutgoingPacketOld::builder(conn.write_buf).with_payload(&key_exchange_init);
 
         if let Ok(kex_init_payload) = builder.payload() {
             exchange.prefixed(kex_init_payload);
@@ -325,10 +325,10 @@ impl KeyExchangeInit<'static> {
     }
 }
 
-impl<'a> TryFrom<Packet<'a>> for KeyExchangeInit<'a> {
+impl<'a> TryFrom<IncomingPacket<'a>> for KeyExchangeInit<'a> {
     type Error = Error;
 
-    fn try_from(packet: Packet<'a>) -> Result<Self, Self::Error> {
+    fn try_from(packet: IncomingPacket<'a>) -> Result<Self, Self::Error> {
         let Decoded {
             value: r#type,
             next,
