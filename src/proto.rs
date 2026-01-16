@@ -178,8 +178,8 @@ pub(crate) struct IncomingPacket<'a> {
     pub(crate) payload: &'a [u8],
 }
 
-#[expect(unused)]
 pub(crate) struct OutgoingPacket<'a> {
+    #[expect(unused)]
     pub(crate) payload: &'a [u8],
 }
 

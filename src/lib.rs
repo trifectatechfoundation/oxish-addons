@@ -10,6 +10,7 @@ mod key_exchange;
 use key_exchange::KeyExchange;
 mod proto;
 use proto::{read, Decode, Decoded, Encode, ReadState};
+mod service;
 
 use crate::{
     key_exchange::{EcdhKeyExchangeInit, KeyExchangeInit},
