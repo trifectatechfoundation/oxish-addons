@@ -1,8 +1,9 @@
+mod monitor;
+
 use std::{
     fs::{self, File},
     io::{self, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener, TcpStream as StdTcpStream},
-    os::unix::net::UnixListener as StdUnixListener,
     sync::Arc,
 };
 
@@ -13,17 +14,14 @@ use oxish::{
     auth::AuthService, connection::ConnectionService, service::ServiceRunner,
     SshTransportConnection,
 };
-use sendfd::RecvWithFd;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, Interest},
-    net::{TcpStream, UnixStream},
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
 };
 
 use tracing::{debug, info, warn};
 
-const MONITOR_SOCK_ADDR: &str = "/tmp/oxish-monitor.sck";
-
-use process_engine::AsyncPtyLeader;
+use crate::monitor::{monitor_main, MonitorStream};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -70,31 +68,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     if monitor_pid == 0 {
-        monitor_main()?;
-        return Ok(());
+        return monitor_main();
     }
 
     debug!("Forked monitor as {monitor_pid}");
 
     listener_main(listener, host_key)
-}
-
-fn monitor_main() -> anyhow::Result<()> {
-    // Create a UNIX listener so each network process can communicate with the monitor
-    let listener = StdUnixListener::bind(MONITOR_SOCK_ADDR)?;
-
-    loop {
-        match listener.accept() {
-            Ok((socket, _)) => {
-                if let Err(e) = process_engine::run_command(socket) {
-                    warn!("Cannot handle connection to monitor: {e}");
-                }
-            }
-            Err(e) => {
-                warn!("Cannot accept incoming connection to monitor: {e}");
-            }
-        }
-    }
 }
 
 fn listener_main(listener: StdTcpListener, host_key: Arc<Ed25519KeyPair>) -> anyhow::Result<()> {
@@ -162,34 +141,17 @@ async fn network_main(
                                 String::from_utf8_lossy(channel_type)
                             );
                             tokio::spawn(async move {
-                                let mut term = {
-                                    debug!("connecting to monitor listener");
-                                    let mut sock =
-                                        UnixStream::connect(MONITOR_SOCK_ADDR).await.unwrap();
+                                debug!("connecting to monitor listener");
+                                let monitor_stream = MonitorStream::connect().await.unwrap();
 
-                                    debug!("sending command to monitor");
-                                    let command = b"/usr/bin/sh";
-                                    sock.write_all(&command.len().to_ne_bytes()).await.unwrap();
-                                    sock.write_all(command).await.unwrap();
-
-                                    debug!("waiting for terminal FD");
-                                    let term_fd = sock
-                                        .async_io(Interest::READABLE, || {
-                                            let mut msg_buf = [0u8; 64];
-                                            let mut fds_buf = [0];
-                                            sock.recv_with_fd(&mut msg_buf, &mut fds_buf)?;
-                                            Ok(fds_buf[0])
-                                        })
-                                        .await
-                                        .unwrap();
-
-                                    unsafe { AsyncPtyLeader::from_raw(term_fd).unwrap() }
-                                };
+                                debug!("sending command to monitor");
+                                let mut command_stream =
+                                    monitor_stream.run_command("/usr/bin/sh").await.unwrap();
 
                                 debug!("copying data to and from the terminal");
                                 loop {
                                     let mut buf = [0; 1024];
-                                    if let Ok(size) = term.read(&mut buf).await {
+                                    if let Ok(size) = command_stream.read(&mut buf).await {
                                         for c in &buf[..size] {
                                             println!("TERM: {}", *c as char);
                                         }
@@ -199,7 +161,7 @@ async fn network_main(
                                     };
 
                                     if let Ok(size) = channels.stdin.read(&mut buf).await {
-                                        let _ = term.write_all(&buf[..size]).await;
+                                        let _ = command_stream.write_all(&buf[..size]).await;
                                         for c in &buf[..size] {
                                             println!("SSH: {}", *c as char);
                                             if *c == 3 {

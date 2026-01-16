@@ -413,7 +413,6 @@ dependencies = [
  "libc",
  "listenfd",
  "process_engine",
- "sendfd",
  "thiserror",
  "tokio",
  "tracing",
