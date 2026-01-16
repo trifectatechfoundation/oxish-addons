@@ -173,6 +173,8 @@ impl From<u8> for MessageType {
 }
 
 pub(crate) struct Packet<'a> {
+    #[expect(unused)]
+    pub(crate) sequence_number: u32,
     pub(crate) payload: &'a [u8],
 }
 
@@ -221,7 +223,11 @@ impl<'a> Decode<'a> for Packet<'a> {
         // No MAC support yet
 
         Ok(Decoded {
-            value: Self { payload },
+            // FIXME: Implement proper handling of sequence numbers
+            value: Self {
+                sequence_number: 0,
+                payload,
+            },
             next,
         })
     }
