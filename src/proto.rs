@@ -28,8 +28,10 @@ impl ReadState {
         };
 
         let payload = packet.payload;
+        let message_type = packet.message_type;
         match T::try_from(packet) {
             Ok(decoded) => Ok(Packeted {
+                message_type,
                 payload,
                 decoded,
                 rest,
@@ -59,6 +61,7 @@ impl Default for ReadState {
 }
 
 pub(crate) struct Packeted<'a, T: 'a> {
+    message_type: MessageType,
     payload: &'a [u8],
     decoded: T,
     rest: usize,
@@ -67,11 +70,14 @@ pub(crate) struct Packeted<'a, T: 'a> {
 impl<'a, T> Packeted<'a, T> {
     pub(crate) fn hash(self, hash: &mut HandshakeHash) -> (T, usize) {
         let Self {
+            message_type,
             payload,
             decoded,
             rest,
         } = self;
-        hash.prefixed(payload);
+        hash.update(&(((payload.len() + 1) as u32).to_be_bytes()));
+        hash.update(&[u8::from(message_type)]);
+        hash.update(payload);
         (decoded, rest)
     }
 
@@ -128,19 +134,7 @@ pub(crate) enum MessageType {
 
 impl Encode for MessageType {
     fn encode(&self, buf: &mut Vec<u8>) {
-        match self {
-            Self::Disconnect => buf.push(1),
-            Self::Ignore => buf.push(2),
-            Self::Unimplemented => buf.push(3),
-            Self::Debug => buf.push(4),
-            Self::ServiceRequest => buf.push(5),
-            Self::ServiceAccept => buf.push(6),
-            Self::KeyExchangeInit => buf.push(20),
-            Self::NewKeys => buf.push(21),
-            Self::KeyExchangeEcdhInit => buf.push(30),
-            Self::KeyExchangeEcdhReply => buf.push(31),
-            Self::Unknown(value) => buf.push(*value),
-        }
+        buf.push(u8::from(*self));
     }
 }
 
@@ -172,13 +166,34 @@ impl From<u8> for MessageType {
     }
 }
 
+impl From<MessageType> for u8 {
+    fn from(value: MessageType) -> Self {
+        match value {
+            MessageType::Disconnect => 1,
+            MessageType::Ignore => 2,
+            MessageType::Unimplemented => 3,
+            MessageType::Debug => 4,
+            MessageType::ServiceRequest => 5,
+            MessageType::ServiceAccept => 6,
+            MessageType::KeyExchangeInit => 20,
+            MessageType::NewKeys => 21,
+            MessageType::KeyExchangeEcdhInit => 30,
+            MessageType::KeyExchangeEcdhReply => 31,
+            MessageType::Unknown(value) => value,
+        }
+    }
+}
+
 pub(crate) struct IncomingPacket<'a> {
     #[expect(unused)]
     pub(crate) sequence_number: u32,
+    pub(crate) message_type: MessageType,
     pub(crate) payload: &'a [u8],
 }
 
 pub(crate) struct OutgoingPacket<'a> {
+    #[expect(unused)]
+    pub(crate) message_type: MessageType,
     #[expect(unused)]
     pub(crate) payload: &'a [u8],
 }
@@ -212,6 +227,17 @@ impl<'a> Decode<'a> for IncomingPacket<'a> {
             return Err(Error::Incomplete(Some(payload_len - next.len())));
         };
 
+        let Decoded {
+            value: message_type,
+            next: payload,
+        } = MessageType::decode(payload).map_err(|e| {
+            if matches!(e, Error::Incomplete(_)) {
+                Error::InvalidPacket("Packet without message type")
+            } else {
+                e
+            }
+        })?;
+
         let Some(next) = next.get(payload_len..) else {
             return Err(Error::Unreachable(
                 "unable to extract rest after fixed-length slice",
@@ -234,6 +260,7 @@ impl<'a> Decode<'a> for IncomingPacket<'a> {
             // FIXME: Implement proper handling of sequence numbers
             value: Self {
                 sequence_number: 0,
+                message_type,
                 payload,
             },
             next,
