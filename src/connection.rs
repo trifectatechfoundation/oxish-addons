@@ -266,6 +266,7 @@ impl ConnectionService {
 
             loop {
                 let channel_future = core::future::poll_fn(|context| {
+                    let mut ready = false;
                     let mut buf = [0u8; BUFFER_SIZE as usize];
                     let mut read_buf = ReadBuf::new(&mut buf);
                     for (_, channel) in channels.iter_mut() {
@@ -306,6 +307,7 @@ impl ConnectionService {
                                     additional_bytes: pending_in,
                                 }));
                                 channel.pending_in = None;
+                                ready = true;
                             }
                         }
                         let acceptable_out = BUFFER_SIZE
@@ -326,6 +328,7 @@ impl ConnectionService {
                                 remote_id: channel.remote_id,
                                 data: data.into(),
                             }));
+                            ready = true;
                         }
                         let acceptable_out = BUFFER_SIZE
                             .min(channel.allowed_out)
@@ -345,14 +348,19 @@ impl ConnectionService {
                                 remote_id: channel.remote_id,
                                 data: data.into(),
                             }));
+                            ready = true;
                         }
                     }
-                    core::task::Poll::Pending::<()>
+                    if ready {
+                        std::task::Poll::Ready(())
+                    } else {
+                        std::task::Poll::Pending
+                    }
                 });
 
                 let select_result = select! {
                     r = packet_receiver.recv() => SelectResult::Packet(r),
-                    _ = channel_future => unreachable!(),
+                    _ = channel_future => continue, 
                 };
 
                 match select_result {
