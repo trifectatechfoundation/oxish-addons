@@ -145,34 +145,34 @@ async fn network_main(
                                 let monitor_stream = MonitorStream::connect().await.unwrap();
 
                                 debug!("sending command to monitor");
-                                let mut command_stream =
+                                let command_stream =
                                     monitor_stream.run_command("/usr/bin/sh").await.unwrap();
 
+                                let (mut command_read, mut command_write) =
+                                    tokio::io::split(command_stream);
+
                                 debug!("copying data to and from the terminal");
-                                loop {
+                                let left = tokio::io::copy(&mut command_read, &mut channels.stdout);
+
+                                let right = async move {
                                     let mut buf = [0; 1024];
-                                    if let Ok(size) = command_stream.read(&mut buf).await {
-                                        for c in &buf[..size] {
-                                            println!("TERM: {}", *c as char);
-                                        }
-
-                                        let _ = channels.stdout.write_all(&buf[..size]).await;
-                                        let _ = channels.stdout.flush().await;
-                                    };
-
-                                    if let Ok(size) = channels.stdin.read(&mut buf).await {
-                                        let _ = command_stream.write_all(&buf[..size]).await;
-                                        for c in &buf[..size] {
-                                            println!("SSH: {}", *c as char);
-                                            if *c == 3 {
-                                                // ctrl-c
-                                                // THERE IS SOMETHING STRANGE GOING ON HERE
-                                                channels.exit_status.send(2).unwrap();
-                                                return;
+                                    loop {
+                                        if let Ok(size) = channels.stdin.read(&mut buf).await {
+                                            let _ = command_write.write_all(&buf[..size]).await;
+                                            for c in &buf[..size] {
+                                                println!("SSH: {}", *c as char);
+                                                if *c == 3 {
+                                                    // ctrl-c
+                                                    // THERE IS SOMETHING STRANGE GOING ON HERE
+                                                    channels.exit_status.send(2).unwrap();
+                                                    return;
+                                                }
                                             }
                                         }
                                     }
-                                }
+                                };
+
+                                let _ = tokio::join!(left, right);
                             });
                             true
                         },
