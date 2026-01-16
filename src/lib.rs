@@ -1,7 +1,11 @@
 use core::net::SocketAddr;
 use std::{io, str, sync::Arc};
 
-use aws_lc_rs::signature::Ed25519KeyPair;
+use aws_lc_rs::{
+    cipher::{self, StreamingDecryptingKey, UnboundCipherKey},
+    hmac,
+    signature::Ed25519KeyPair,
+};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -12,7 +16,7 @@ use tracing::{debug, error, warn};
 mod key_exchange;
 use key_exchange::KeyExchange;
 mod proto;
-use proto::{Encode, ReadState};
+use proto::{Decode, Decoded, Encode, MessageType, Packet, ReadState};
 
 use crate::{
     key_exchange::{EcdhKeyExchangeInit, KeyExchangeInit},
@@ -104,7 +108,7 @@ impl Connection {
             write_buf: &mut self.write_buf,
         };
 
-        let Ok((packet, _keys)) = state.advance(ecdh_key_exchange_init, exchange, &mut cx) else {
+        let Ok((packet, keys)) = state.advance(ecdh_key_exchange_init, exchange, &mut cx) else {
             return;
         };
 
@@ -112,6 +116,60 @@ impl Connection {
             error!(addr = %self.addr, %error, "failed to send ECDH key exchange reply");
             return;
         }
+
+        let packet = match self.read.read_packet(&mut self.stream).await {
+            Ok(packet) => packet,
+            Err(error) => {
+                warn!(addr = %self.addr, %error, "failed to read packet");
+                return;
+            }
+        };
+        let r#type = match MessageType::decode(packet.payload) {
+            Ok(Decoded {
+                value: r#type,
+                next: _,
+            }) => r#type,
+            Err(error) => {
+                warn!(addr = %self.addr, %error, "failed to read packet type");
+                return;
+            }
+        };
+        if r#type != MessageType::NewKeys {
+            warn!(addr = %self.addr,  "unexpected message type {:?}", r#type);
+            return;
+        }
+
+        self.write_buf.clear();
+        let Ok(packet) = Packet::builder(&mut self.write_buf)
+            .with_payload(&MessageType::NewKeys)
+            .without_mac()
+        else {
+            error!(addr = %self.addr, "failed to build newkeys packet");
+            return;
+        };
+
+        if let Err(error) = self.stream.write_all(&packet).await {
+            warn!(addr = %self.addr, %error, "failed to send newkeys packet");
+            return;
+        }
+
+        self.read.decryption_key = Some((
+            StreamingDecryptingKey::ctr(
+                UnboundCipherKey::new(
+                    &cipher::AES_128,
+                    &keys.client_to_server.encryption_key.derive::<16>(),
+                )
+                .unwrap(),
+                cipher::DecryptionContext::Iv128(
+                    keys.client_to_server.initial_iv.derive::<16>().into(),
+                ),
+            )
+            .unwrap(),
+            hmac::Key::new(
+                hmac::HMAC_SHA256,
+                &keys.client_to_server.integrity_key.derive::<32>(),
+            ),
+        ));
 
         todo!();
     }

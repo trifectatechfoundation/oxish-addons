@@ -91,8 +91,6 @@ impl EcdhKeyExchange {
             return Err(());
         };
 
-        // FIXME wait for and send newkey packet
-
         // The first exchange hash is used as session id.
         let derivation = KeyDerivation {
             shared_secret,
@@ -500,15 +498,14 @@ impl<'a, T: From<&'a str>> Decode<'a> for Vec<T> {
 /// <https://www.rfc-editor.org/rfc/rfc4253#section-7.2>
 #[expect(dead_code)] // FIXME implement encryption/decryption and MAC
 pub(crate) struct RawKeySet {
-    client_to_server: RawKeys,
-    server_to_client: RawKeys,
+    pub(crate) client_to_server: RawKeys,
+    pub(crate) server_to_client: RawKeys,
 }
 
-#[expect(dead_code)] // FIXME implement encryption/decryption and MAC
-struct RawKeys {
-    initial_iv: Key,
-    encryption_key: Key,
-    integrity_key: Key,
+pub(crate) struct RawKeys {
+    pub(crate) initial_iv: Key,
+    pub(crate) encryption_key: Key,
+    pub(crate) integrity_key: Key,
 }
 
 impl RawKeys {
@@ -549,15 +546,14 @@ impl KeyDerivation {
     }
 }
 
-struct Key {
+pub(crate) struct Key {
     base: digest::Context,
     session_id: Arc<digest::Digest>,
     input: KeyInput,
 }
 
-#[expect(dead_code)] // FIXME implement encryption/decryption and MAC
 impl Key {
-    fn derive<const N: usize>(self) -> [u8; N] {
+    pub(crate) fn derive<const N: usize>(self) -> [u8; N] {
         let block_len = digest::SHA256.output_len();
 
         let mut key = [0; N];
