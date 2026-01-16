@@ -10,70 +10,6 @@ use tracing::debug;
 
 use crate::Error;
 
-// Message type for the transport layer and key exchange messages.
-// Note: this MUST map service messages to the unknown type, otherwise
-// the service manager will not work right.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MessageType {
-    Disconnect,
-    Ignore,
-    Unimplemented,
-    Debug,
-    ServiceRequest,
-    ServiceAccept,
-    KeyExchangeInit,
-    NewKeys,
-    KeyExchangeEcdhInit,
-    KeyExchangeEcdhReply,
-    Unknown(u8),
-}
-
-impl Encode for MessageType {
-    fn encode(&self, buf: &mut Vec<u8>) {
-        match self {
-            Self::Disconnect => buf.push(1),
-            Self::Ignore => buf.push(2),
-            Self::Unimplemented => buf.push(3),
-            Self::Debug => buf.push(4),
-            Self::ServiceRequest => buf.push(5),
-            Self::ServiceAccept => buf.push(6),
-            Self::KeyExchangeInit => buf.push(20),
-            Self::NewKeys => buf.push(21),
-            Self::KeyExchangeEcdhInit => buf.push(30),
-            Self::KeyExchangeEcdhReply => buf.push(31),
-            Self::Unknown(value) => buf.push(*value),
-        }
-    }
-}
-
-impl<'a> Decode<'a> for MessageType {
-    fn decode(bytes: &'a [u8]) -> Result<Decoded<'a, Self>, Error> {
-        let Decoded { value, next } = u8::decode(bytes)?;
-        Ok(Decoded {
-            value: Self::from(value),
-            next,
-        })
-    }
-}
-
-impl From<u8> for MessageType {
-    fn from(value: u8) -> Self {
-        match value {
-            1 => Self::Disconnect,
-            2 => Self::Ignore,
-            3 => Self::Unimplemented,
-            4 => Self::Debug,
-            5 => Self::ServiceRequest,
-            6 => Self::ServiceAccept,
-            20 => Self::KeyExchangeInit,
-            21 => Self::NewKeys,
-            30 => Self::KeyExchangeEcdhInit,
-            31 => Self::KeyExchangeEcdhReply,
-            value => Self::Unknown(value),
-        }
-    }
-}
-
 /// The reader and decryption state for an SSH connection.
 // FIXME implement in-place decryption once aws-lc-rs supports this for AES-CTR.
 pub(crate) struct ReadState {
@@ -267,6 +203,70 @@ impl ReadState {
     /// You may not touch existing data and must only append new data at the end.
     pub(crate) fn incoming_buf(&mut self) -> &mut Vec<u8> {
         &mut self.buf
+    }
+}
+
+// Message type for the transport layer and key exchange messages.
+// Note: this MUST map service messages to the unknown type, otherwise
+// the service manager will not work right.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MessageType {
+    Disconnect,
+    Ignore,
+    Unimplemented,
+    Debug,
+    ServiceRequest,
+    ServiceAccept,
+    KeyExchangeInit,
+    NewKeys,
+    KeyExchangeEcdhInit,
+    KeyExchangeEcdhReply,
+    Unknown(u8),
+}
+
+impl Encode for MessageType {
+    fn encode(&self, buf: &mut Vec<u8>) {
+        match self {
+            Self::Disconnect => buf.push(1),
+            Self::Ignore => buf.push(2),
+            Self::Unimplemented => buf.push(3),
+            Self::Debug => buf.push(4),
+            Self::ServiceRequest => buf.push(5),
+            Self::ServiceAccept => buf.push(6),
+            Self::KeyExchangeInit => buf.push(20),
+            Self::NewKeys => buf.push(21),
+            Self::KeyExchangeEcdhInit => buf.push(30),
+            Self::KeyExchangeEcdhReply => buf.push(31),
+            Self::Unknown(value) => buf.push(*value),
+        }
+    }
+}
+
+impl<'a> Decode<'a> for MessageType {
+    fn decode(bytes: &'a [u8]) -> Result<Decoded<'a, Self>, Error> {
+        let Decoded { value, next } = u8::decode(bytes)?;
+        Ok(Decoded {
+            value: Self::from(value),
+            next,
+        })
+    }
+}
+
+impl From<u8> for MessageType {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => Self::Disconnect,
+            2 => Self::Ignore,
+            3 => Self::Unimplemented,
+            4 => Self::Debug,
+            5 => Self::ServiceRequest,
+            6 => Self::ServiceAccept,
+            20 => Self::KeyExchangeInit,
+            21 => Self::NewKeys,
+            30 => Self::KeyExchangeEcdhInit,
+            31 => Self::KeyExchangeEcdhReply,
+            value => Self::Unknown(value),
+        }
     }
 }
 
