@@ -2,7 +2,7 @@ use std::{
     fs::{self, File},
     io::{self, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener, TcpStream as StdTcpStream},
-    os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream},
+    os::unix::net::UnixListener as StdUnixListener,
     sync::Arc,
 };
 
@@ -121,7 +121,7 @@ fn listener_main(listener: StdTcpListener, host_key: Arc<Ed25519KeyPair>) -> any
                     return Ok(());
                 }
 
-               debug!("Forked network as {network_pid}");
+                debug!("Forked network as {network_pid}");
             }
 
             Err(error) => {
