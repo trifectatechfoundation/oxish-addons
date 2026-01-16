@@ -11,6 +11,7 @@ use key_exchange::KeyExchange;
 mod proto;
 use proto::{read, Decode, Decoded, Encode, ReadState};
 mod service;
+mod userauth;
 
 use crate::{
     key_exchange::{EcdhKeyExchangeInit, KeyExchangeInit},
@@ -249,6 +250,12 @@ enum Error {
     NoCommonAlgorithm(&'static str),
     #[error("unreachable code: {0}")]
     Unreachable(&'static str),
+    #[error("not ready for new packets")]
+    #[expect(
+        unused,
+        reason = "Use marking from the service trait is failing in the compiler"
+    )]
+    NotReady,
 }
 
 #[derive(Debug, Error)]
