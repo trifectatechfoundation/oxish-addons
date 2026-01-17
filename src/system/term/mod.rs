@@ -17,13 +17,13 @@ use super::interface::ProcessId;
 
 pub(crate) use user_term::UserTerm;
 
-pub(crate) struct Pty {
+pub struct Pty {
     /// The file path of the leader side of the pty.
-    pub(crate) path: CString,
+    pub path: CString,
     /// The leader side of the pty.
-    pub(crate) leader: PtyLeader,
+    pub leader: PtyLeader,
     /// The follower side of the pty.
-    pub(crate) follower: PtyFollower,
+    pub follower: PtyFollower,
 }
 
 impl Pty {
@@ -76,7 +76,7 @@ impl Pty {
     }
 }
 
-pub(crate) struct PtyLeader {
+pub struct PtyLeader {
     file: File,
 }
 
@@ -143,12 +143,12 @@ impl AsRawFd for PtyLeader {
     }
 }
 
-pub(crate) struct PtyFollower {
+pub struct PtyFollower {
     file: File,
 }
 
 impl PtyFollower {
-    pub(crate) fn try_clone(&self) -> io::Result<Self> {
+    pub fn try_clone(&self) -> io::Result<Self> {
         self.file.try_clone().map(|file| Self { file })
     }
 }
