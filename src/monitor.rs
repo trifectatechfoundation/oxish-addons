@@ -1,17 +1,24 @@
 use std::{
-    io,
+    ffi::OsStr,
+    io::{self, Read},
     marker::PhantomData,
-    os::unix::{ffi::OsStrExt, net::UnixListener as StdUnixListener},
+    os::{
+        fd::{AsFd, AsRawFd},
+        unix::{
+            ffi::OsStrExt,
+            net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream},
+            process::CommandExt,
+        },
+    },
     path::Path,
-    pin::Pin,
-    task::{Context, Poll},
+    process::Command,
 };
 
-use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
-    net::UnixStream,
-};
+use process_engine::get_pty;
+use tokio::{io::AsyncWriteExt, net::UnixStream};
 use tracing::warn;
+
+use crate::fd::{recv_fd, send_fd, FdStream};
 
 const MONITOR_SOCK_ADDR: &str = "/tmp/oxish-monitor.sck";
 
@@ -55,31 +62,16 @@ impl MonitorStream<CommandSetup> {
     }
 }
 
-impl AsyncRead for MonitorStream<CommandRunning> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        unsafe { self.map_unchecked_mut(|s| &mut s.inner) }.poll_read(cx, buf)
-    }
-}
+impl MonitorStream<CommandRunning> {
+    pub(crate) async fn recv_pty(mut self) -> io::Result<FdStream> {
+        let fd = recv_fd(&mut self.inner).await?;
 
-impl AsyncWrite for MonitorStream<CommandRunning> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, io::Error>> {
-        unsafe { self.map_unchecked_mut(|s| &mut s.inner) }.poll_write(cx, buf)
-    }
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        unsafe { self.map_unchecked_mut(|s| &mut s.inner) }.poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        unsafe { self.map_unchecked_mut(|s| &mut s.inner) }.poll_shutdown(cx)
+        Ok(unsafe { FdStream::from_raw(fd) }?)
     }
 }
 
@@ -96,7 +88,7 @@ pub(crate) fn monitor_main() -> anyhow::Result<()> {
     loop {
         match listener.accept() {
             Ok((socket, _)) => {
-                if let Err(e) = process_engine::run_command(socket) {
+                if let Err(e) = accept_request(socket) {
                     warn!("Cannot handle connection to monitor: {e}");
                 }
             }
@@ -105,4 +97,48 @@ pub(crate) fn monitor_main() -> anyhow::Result<()> {
             }
         }
     }
+}
+
+pub(crate) fn accept_request(mut socket: StdUnixStream) -> anyhow::Result<()> {
+    // Read the length of the command
+    let mut buf = [0; size_of::<usize>()];
+    let read_len = socket.read(&mut buf)?;
+    assert_eq!(buf.len(), read_len);
+
+    // Read the actual command
+    let command_len = usize::from_ne_bytes(buf);
+    let mut buf = vec![0; command_len];
+    let read_len = socket.read(&mut buf)?;
+    assert_eq!(command_len, read_len);
+
+    let command = OsStr::from_bytes(&buf);
+
+    tracing::debug!("opening PTY");
+    let pty = get_pty()?;
+
+    tracing::debug!("sending PTY to network");
+    send_fd(&mut socket, pty.leader.as_raw_fd())?;
+
+    let mut command = Command::new(command);
+    let fd_follower = pty.follower.as_fd().as_raw_fd();
+
+    unsafe {
+        command.pre_exec(move || {
+            // make a new session for the process
+            libc::setsid();
+            // set the follower as the controlling terminal
+            libc::ioctl(fd_follower, libc::TIOCSCTTY, 0);
+            Ok(())
+        })
+    };
+
+    command
+        .stdin(pty.follower.try_clone()?)
+        .stdout(pty.follower.try_clone()?)
+        .stderr(pty.follower);
+
+    tracing::debug!("running command: {:?}", command.get_program());
+    let _child = command.spawn()?;
+
+    Ok(())
 }

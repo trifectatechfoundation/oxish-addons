@@ -1,5 +1,5 @@
-mod monitor;
 mod fd;
+mod monitor;
 
 use std::{
     fs::{self, File},
@@ -146,20 +146,24 @@ async fn network_main(
                                 let monitor_stream = MonitorStream::connect().await.unwrap();
 
                                 debug!("sending command to monitor");
-                                let command_stream =
-                                    monitor_stream.run_command("/usr/bin/sh").await.unwrap();
+                                let term_stream = monitor_stream
+                                    .run_command("/usr/bin/sh")
+                                    .await
+                                    .unwrap()
+                                    .recv_pty()
+                                    .await
+                                    .unwrap();
 
-                                let (mut command_read, mut command_write) =
-                                    tokio::io::split(command_stream);
+                                let (mut term_read, mut term_write) = tokio::io::split(term_stream);
 
                                 debug!("copying data to and from the terminal");
-                                let left = tokio::io::copy(&mut command_read, &mut channels.stdout);
+                                let left = tokio::io::copy(&mut term_read, &mut channels.stdout);
 
                                 let right = async move {
                                     let mut buf = [0; 1024];
                                     loop {
                                         if let Ok(size) = channels.stdin.read(&mut buf).await {
-                                            let _ = command_write.write_all(&buf[..size]).await;
+                                            let _ = term_write.write_all(&buf[..size]).await;
                                             for c in &buf[..size] {
                                                 println!("SSH: {}", *c as char);
                                                 if *c == 3 {
