@@ -5,19 +5,22 @@ use std::{
     fs::{self, File},
     io::{self, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener, TcpStream as StdTcpStream},
+    pin::Pin,
     sync::Arc,
+    task::Poll,
 };
 
 use aws_lc_rs::signature::Ed25519KeyPair;
 use clap::Parser;
 use listenfd::ListenFd;
 use oxish::{
-    auth::AuthService, connection::ConnectionService, service::ServiceRunner,
+    auth::AuthService, connection::ConnectionService, service::ServiceRunner, BufferedStream,
     SshTransportConnection,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, ReadHalf},
     net::TcpStream,
+    sync::oneshot,
 };
 
 use tracing::{debug, info, warn};
@@ -112,6 +115,33 @@ fn listener_main(listener: StdTcpListener, host_key: Arc<Ed25519KeyPair>) -> any
     }
 }
 
+pub struct StdinAndExit<const N: usize> {
+    stdin: ReadHalf<BufferedStream<N>>,
+    exit_status: Option<oneshot::Sender<u32>>,
+}
+
+impl<const N: usize> AsyncRead for StdinAndExit<N> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let poll = Pin::new(&mut self.stdin).poll_read(cx, buf);
+
+        if let Poll::Ready(Ok(())) = poll {
+            for byte in buf.filled() {
+                if *byte == 3 {
+                    if let Some(sender) = self.exit_status.take() {
+                        let _ = sender.send(2);
+                    }
+                }
+            }
+        }
+
+        poll
+    }
+}
+
 async fn network_main(
     stream: StdTcpStream,
     addr: SocketAddr,
@@ -136,7 +166,7 @@ async fn network_main(
                         String::from_utf8_lossy(service_name)
                     );
                     Some(Box::new(ConnectionService::new(
-                        move |channel_type, _type_data, mut channels| {
+                        move |channel_type, _type_data, channels| {
                             debug!(
                                 "New channel of type {}",
                                 String::from_utf8_lossy(channel_type)
@@ -146,7 +176,7 @@ async fn network_main(
                                 let monitor_stream = MonitorStream::connect().await.unwrap();
 
                                 debug!("sending command to monitor");
-                                let term_stream = monitor_stream
+                                let mut term_stream = monitor_stream
                                     .run_command("/usr/bin/sh")
                                     .await
                                     .unwrap()
@@ -154,30 +184,21 @@ async fn network_main(
                                     .await
                                     .unwrap();
 
-                                let (mut term_read, mut term_write) = tokio::io::split(term_stream);
-
-                                debug!("copying data to and from the terminal");
-                                let left = tokio::io::copy(&mut term_read, &mut channels.stdout);
-
-                                let right = async move {
-                                    let mut buf = [0; 1024];
-                                    loop {
-                                        if let Ok(size) = channels.stdin.read(&mut buf).await {
-                                            let _ = term_write.write_all(&buf[..size]).await;
-                                            for c in &buf[..size] {
-                                                println!("SSH: {}", *c as char);
-                                                if *c == 3 {
-                                                    // ctrl-c
-                                                    // THERE IS SOMETHING STRANGE GOING ON HERE
-                                                    channels.exit_status.send(2).unwrap();
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                    }
+                                let stdin_and_exit = StdinAndExit {
+                                    stdin: channels.stdin,
+                                    exit_status: Some(channels.exit_status),
                                 };
 
-                                let _ = tokio::join!(left, right);
+                                let mut stdio_stream =
+                                    tokio::io::join(stdin_and_exit, channels.stdout);
+
+                                debug!("copying data to and from the terminal");
+                                let _ = tokio::io::copy_bidirectional(
+                                    &mut term_stream,
+                                    &mut stdio_stream,
+                                )
+                                .await;
+                                tracing::debug!("done copying data to and from the terminal");
                             });
                             true
                         },
