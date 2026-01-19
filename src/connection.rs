@@ -308,43 +308,53 @@ impl ConnectionService {
                                 channel.pending_in = None;
                             }
                         }
-                        let acceptable_out = BUFFER_SIZE
-                            .min(channel.allowed_out)
-                            .min(channel.max_packet_size);
-                        read_buf.clear();
-                        if acceptable_out > 0
-                            && matches!(
-                                Pin::new(&mut stderr).poll_read(context, &mut read_buf),
-                                core::task::Poll::Ready(_)
-                            )
-                        {
-                            let data = read_buf.filled();
-                            channel.allowed_out = channel
-                                .allowed_out
-                                .saturating_sub(data.len().try_into().unwrap());
-                            let _ = packet_sender.send(Box::new(ChannelExtendedDataStderr {
-                                remote_id: channel.remote_id,
-                                data: data.into(),
-                            }));
+
+                        loop {
+                            let acceptable_out = BUFFER_SIZE
+                                .min(channel.allowed_out)
+                                .min(channel.max_packet_size);
+                            read_buf.clear();
+                            if acceptable_out > 0
+                                && matches!(
+                                    Pin::new(&mut stderr).poll_read(context, &mut read_buf),
+                                    core::task::Poll::Ready(_)
+                                )
+                            {
+                                let data = read_buf.filled();
+                                channel.allowed_out = channel
+                                    .allowed_out
+                                    .saturating_sub(data.len().try_into().unwrap());
+                                let _ = packet_sender.send(Box::new(ChannelExtendedDataStderr {
+                                    remote_id: channel.remote_id,
+                                    data: data.into(),
+                                }));
+                                continue;
+                            }
+                            break;
                         }
-                        let acceptable_out = BUFFER_SIZE
-                            .min(channel.allowed_out)
-                            .min(channel.max_packet_size);
-                        read_buf.clear();
-                        if acceptable_out > 0
-                            && matches!(
-                                Pin::new(&mut stdout).poll_read(context, &mut read_buf),
-                                core::task::Poll::Ready(_)
-                            )
-                        {
-                            let data = read_buf.filled();
-                            channel.allowed_out = channel
-                                .allowed_out
-                                .saturating_sub(data.len().try_into().unwrap());
-                            let _ = packet_sender.send(Box::new(ChannelData {
-                                remote_id: channel.remote_id,
-                                data: data.into(),
-                            }));
+
+                        loop {
+                            let acceptable_out = BUFFER_SIZE
+                                .min(channel.allowed_out)
+                                .min(channel.max_packet_size);
+                            read_buf.clear();
+                            if acceptable_out > 0
+                                && matches!(
+                                    Pin::new(&mut stdout).poll_read(context, &mut read_buf),
+                                    core::task::Poll::Ready(_)
+                                )
+                            {
+                                let data = read_buf.filled();
+                                channel.allowed_out = channel
+                                    .allowed_out
+                                    .saturating_sub(data.len().try_into().unwrap());
+                                let _ = packet_sender.send(Box::new(ChannelData {
+                                    remote_id: channel.remote_id,
+                                    data: data.into(),
+                                }));
+                                continue;
+                            }
+                            break;
                         }
                     }
                     core::task::Poll::Pending::<()>
