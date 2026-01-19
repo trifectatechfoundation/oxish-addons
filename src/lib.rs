@@ -10,6 +10,8 @@ use tokio::{
 use tracing::{debug, warn};
 
 pub mod auth;
+mod buffered_stream;
+pub use buffered_stream::{buffered_stream, BufferedStream};
 pub mod connection;
 mod key_exchange;
 use key_exchange::KeyExchange;

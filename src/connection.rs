@@ -3,11 +3,12 @@ use std::collections::HashMap;
 
 use futures::FutureExt;
 use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, SimplexStream},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
     select,
 };
 
 use crate::{
+    buffered_stream::{buffered_stream, BufferedStream},
     proto::{Decode, Decoded, Encode, OwnedPacket, Packet},
     service::Service,
     Error,
@@ -203,17 +204,17 @@ impl Encode for ChannelFailure {
 
 pub struct ChannelStreams {
     pub exit_status: tokio::sync::oneshot::Sender<u32>,
-    pub stdin: tokio::io::ReadHalf<SimplexStream>,
-    pub stdout: tokio::io::WriteHalf<SimplexStream>,
-    pub stderr: tokio::io::WriteHalf<SimplexStream>,
+    pub stdin: tokio::io::ReadHalf<BufferedStream<{ BUFFER_SIZE as usize }>>,
+    pub stdout: tokio::io::WriteHalf<BufferedStream<{ BUFFER_SIZE as usize }>>,
+    pub stderr: tokio::io::WriteHalf<BufferedStream<{ BUFFER_SIZE as usize }>>,
 }
 
 enum ChannelInternalState {
     Open {
         exit_status: tokio::sync::oneshot::Receiver<u32>,
-        stdin: tokio::io::WriteHalf<SimplexStream>,
-        stdout: tokio::io::ReadHalf<SimplexStream>,
-        stderr: tokio::io::ReadHalf<SimplexStream>,
+        stdin: tokio::io::WriteHalf<BufferedStream<{ BUFFER_SIZE as usize }>>,
+        stdout: tokio::io::ReadHalf<BufferedStream<{ BUFFER_SIZE as usize }>>,
+        stderr: tokio::io::ReadHalf<BufferedStream<{ BUFFER_SIZE as usize }>>,
     },
     ServerClosed,
 }
@@ -408,12 +409,9 @@ impl ConnectionService {
 
                                 let (exit_status_sender, exit_status) =
                                     tokio::sync::oneshot::channel();
-                                let (stdin, stdin_sender) =
-                                    tokio::io::simplex(BUFFER_SIZE.try_into().unwrap());
-                                let (stdout_receiver, stdout) =
-                                    tokio::io::simplex(BUFFER_SIZE.try_into().unwrap());
-                                let (stderr_receiver, stderr) =
-                                    tokio::io::simplex(BUFFER_SIZE.try_into().unwrap());
+                                let (stdin, stdin_sender) = buffered_stream();
+                                let (stdout_receiver, stdout) = buffered_stream();
+                                let (stderr_receiver, stderr) = buffered_stream();
 
                                 if channel_handler(
                                     channel_type,
