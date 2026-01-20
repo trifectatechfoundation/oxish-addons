@@ -31,7 +31,8 @@ fn make_msghdr(
         msg_iov: iov,
         msg_iovlen: 1,
         msg_control: buf.as_mut_ptr().cast(),
-        msg_controllen: buf.len(),
+        #[allow(trivial_numeric_casts)]
+        msg_controllen: buf.len() as _,
         msg_flags: 0,
     }
 }
@@ -48,7 +49,10 @@ pub(crate) fn send_fd(socket: &mut StdUnixStream, mut fd: RawFd) -> io::Result<(
 
     let cmsgp = unsafe { libc::CMSG_FIRSTHDR(&raw mut msgh) };
 
-    unsafe { (*cmsgp).cmsg_len = libc::CMSG_LEN(size_of::<RawFd>() as _) as _ };
+    #[allow(trivial_numeric_casts)]
+    unsafe {
+        (*cmsgp).cmsg_len = libc::CMSG_LEN(size_of::<RawFd>() as _) as _
+    };
     unsafe { (*cmsgp).cmsg_level = libc::SOL_SOCKET };
     unsafe { (*cmsgp).cmsg_type = libc::SCM_RIGHTS };
     unsafe {
@@ -79,6 +83,7 @@ pub(crate) async fn recv_fd(socket: &mut UnixStream) -> io::Result<RawFd> {
 
             let cmsgp = unsafe { libc::CMSG_FIRSTHDR(&raw mut msgh) };
 
+            #[allow(trivial_numeric_casts)]
             if (cmsgp.is_null())
                 || (unsafe { (*cmsgp).cmsg_len != libc::CMSG_LEN(size_of::<RawFd>() as _) as _ })
                 || (unsafe { (*cmsgp).cmsg_level != libc::SOL_SOCKET })

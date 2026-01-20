@@ -49,10 +49,11 @@ impl User {
             // SAFETY: getgrouplist is passed valid pointers
             // in particular `groups_buffer` is an array of `buf.len()` bytes, as required
             let result = unsafe {
+                #[allow(trivial_numeric_casts)]
                 libc::getgrouplist(
                     pwd.pw_name,
-                    pwd.pw_gid,
-                    groups_buffer.as_mut_ptr(),
+                    pwd.pw_gid as _,
+                    groups_buffer.as_mut_ptr().cast(),
                     &mut buf_len,
                 )
             };
