@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use core::fmt::Display;
 
 /// Represents a group ID in the system.
 ///
@@ -33,13 +33,13 @@ impl UserId {
 }
 
 impl Display for GroupId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
 impl Display for UserId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
     }
 }

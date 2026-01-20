@@ -4,10 +4,11 @@ use std::{
         fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::net::UnixStream as StdUnixStream,
     },
-    pin::Pin,
-    ptr::null_mut,
-    task::{ready, Context, Poll},
 };
+
+use core::pin::Pin;
+use core::ptr::null_mut;
+use core::task::{ready, Context, Poll};
 
 use tokio::{
     io::{unix::AsyncFd, AsyncRead, AsyncWrite, Interest, ReadBuf},
@@ -64,7 +65,7 @@ pub(crate) fn send_fd(socket: &mut StdUnixStream, mut fd: RawFd) -> io::Result<(
     };
 
     if unsafe { libc::sendmsg(socket.as_raw_fd(), &raw mut msgh, 0) } == -1 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
 
     Ok(())
@@ -89,10 +90,7 @@ pub(crate) async fn recv_fd(socket: &mut UnixStream) -> io::Result<RawFd> {
                 || (unsafe { (*cmsgp).cmsg_level != libc::SOL_SOCKET })
                 || (unsafe { (*cmsgp).cmsg_type != libc::SCM_RIGHTS })
             {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "received invalid message",
-                ));
+                return Err(io::Error::other("received invalid message"));
             }
 
             let mut fd: RawFd = 0;
@@ -142,7 +140,7 @@ impl AsyncRead for FdStream {
                 };
 
                 if len == -1 {
-                    return Err(io::Error::last_os_error());
+                    Err(io::Error::last_os_error())
                 } else {
                     Ok(len as usize)
                 }
@@ -171,7 +169,7 @@ impl AsyncWrite for FdStream {
                 let len = unsafe { libc::write(inner.as_raw_fd(), buf.as_ptr().cast(), buf.len()) };
 
                 if len == -1 {
-                    return Err(io::Error::last_os_error());
+                    Err(io::Error::last_os_error())
                 } else {
                     Ok(len as usize)
                 }

@@ -1,9 +1,9 @@
+use core::ptr::null_mut;
 use std::{
     ffi::CString,
     fs::File,
     io,
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
-    ptr::null_mut,
 };
 
 use super::super::cutils::cerr;

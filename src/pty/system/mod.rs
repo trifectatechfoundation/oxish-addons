@@ -1,7 +1,9 @@
-use std::{
+use core::{
     ffi::{c_int, CStr},
-    io::{self, Error},
     mem::MaybeUninit,
+};
+use std::{
+    io::{self, Error},
     path::PathBuf,
 };
 
@@ -40,7 +42,7 @@ impl User {
     /// # Safety
     /// This function expects `pwd` to be a result from a successful call to `getpwXXX_r`.
     /// (It can cause UB if any of `pwd`'s pointed-to strings does not have a null-terminator.)
-    unsafe fn from_libc(pwd: &libc::passwd) -> Result<User, Error> {
+    unsafe fn from_libc(pwd: &libc::passwd) -> Result<Self, Error> {
         let mut buf_len: c_int = 32;
         let mut groups_buffer: Vec<libc::gid_t>;
 
@@ -74,7 +76,7 @@ impl User {
         // SAFETY: All pointers were initialized by a successful call to `getpwXXX_r` as per the
         // safety invariant of this function.
         unsafe {
-            Ok(User {
+            Ok(Self {
                 uid: UserId::new(pwd.pw_uid),
                 gid: GroupId::new(pwd.pw_gid),
                 name: string_from_ptr(pwd.pw_name),
@@ -88,11 +90,11 @@ impl User {
         }
     }
 
-    pub(crate) fn from_uid(uid: UserId) -> Result<Option<User>, Error> {
+    pub(crate) fn from_uid(uid: UserId) -> Result<Option<Self>, Error> {
         let max_pw_size = sysconf(libc::_SC_GETPW_R_SIZE_MAX).unwrap_or(16_384);
         let mut buf = vec![0; max_pw_size as usize];
         let mut pwd = MaybeUninit::uninit();
-        let mut pwd_ptr = std::ptr::null_mut();
+        let mut pwd_ptr = core::ptr::null_mut();
         // SAFETY: getpwuid_r is passed valid (although partly uninitialized) pointers to memory,
         // in particular `buf` points to an array of `buf.len()` bytes, as required.
         // After this call, if `pwd_ptr` is not NULL, `*pwd_ptr` and `pwd` will be aliased;
@@ -127,7 +129,7 @@ impl User {
         UserId::new(unsafe { libc::getuid() })
     }
 
-    pub(crate) fn real() -> Result<Option<User>, Error> {
+    pub(crate) fn real() -> Result<Option<Self>, Error> {
         Self::from_uid(Self::real_uid())
     }
 }
@@ -137,17 +139,17 @@ pub(crate) struct Group {
 }
 
 impl Group {
-    fn from_libc(grp: &libc::group) -> Group {
-        Group {
+    fn from_libc(grp: &libc::group) -> Self {
+        Self {
             gid: GroupId::new(grp.gr_gid),
         }
     }
 
-    pub(crate) fn from_name(name_c: &CStr) -> io::Result<Option<Group>> {
+    pub(crate) fn from_name(name_c: &CStr) -> io::Result<Option<Self>> {
         let max_gr_size = sysconf(libc::_SC_GETGR_R_SIZE_MAX).unwrap_or(16_384);
         let mut buf = vec![0; max_gr_size as usize];
         let mut grp = MaybeUninit::uninit();
-        let mut grp_ptr = std::ptr::null_mut();
+        let mut grp_ptr = core::ptr::null_mut();
         // SAFETY: analogous to getpwuid_r above
         cerr(unsafe {
             libc::getgrnam_r(
@@ -165,7 +167,7 @@ impl Group {
             // the `grp` structure was written to by getgrgid_r
             let grp = unsafe { grp.assume_init() };
             // SAFETY: `pwd` was obtained by a call to getgrXXX_r, as required.
-            Ok(Some(Group::from_libc(&grp)))
+            Ok(Some(Self::from_libc(&grp)))
         }
     }
 }
