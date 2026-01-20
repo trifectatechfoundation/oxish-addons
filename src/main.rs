@@ -24,12 +24,12 @@ use oxish::{
 use tokio::{
     io::{AsyncRead, ReadHalf},
     net::TcpStream,
-    sync::oneshot,
+    sync::{oneshot, Mutex},
 };
 
 use tracing::{debug, info, warn};
 
-use crate::monitor::{monitor_main, MonitorStream};
+use crate::monitor::{monitor_main, Idle, MonitorStream};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -69,52 +69,34 @@ fn main() -> anyhow::Result<()> {
     };
     info!(addr = %listener.local_addr()?, "listening for connections");
 
-    let monitor_pid = unsafe { libc::fork() };
-
-    if monitor_pid == -1 {
-        anyhow::bail!("Cannot fork monitor process");
-    }
-
-    if monitor_pid == 0 {
-        return monitor_main();
-    }
-
-    debug!("Forked monitor as {monitor_pid}");
-
     listener_main(listener, host_key)
 }
 
 fn listener_main(listener: StdTcpListener, host_key: Arc<Ed25519KeyPair>) -> anyhow::Result<()> {
-    // Ignore SIGCHLD
-    if libc::SIG_ERR == unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) } {
-        return Err(io::Error::last_os_error().into());
-    }
+    let mut already_ignoring = false;
 
     loop {
         match listener.accept() {
             Ok((stream, addr)) => {
-                let network_pid = unsafe { libc::fork() };
+                let monitor_pid = unsafe { libc::fork() };
 
-                if network_pid == -1 {
-                    anyhow::bail!("Cannot fork network process");
+                if monitor_pid == -1 {
+                    anyhow::bail!("Cannot fork monitor process");
                 }
 
-                if network_pid == 0 {
-                    // Move the network process to its own session so it doesn't get terminated if
-                    // the server exits.
-                    if unsafe { libc::setsid() } == -1 {
+                if monitor_pid == 0 {
+                    return monitor_main(stream, addr, host_key.clone());
+                }
+
+                if !already_ignoring {
+                    // Ignore SIGCHLD
+                    if libc::SIG_ERR == unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) } {
                         return Err(io::Error::last_os_error().into());
                     }
-
-                    tokio::runtime::Runtime::new()?.block_on(network_main(
-                        stream,
-                        addr,
-                        host_key.clone(),
-                    ))?;
-                    return Ok(());
+                    already_ignoring = true;
                 }
 
-                debug!("Forked network as {network_pid}");
+                debug!("Forked monitor as {monitor_pid}");
             }
 
             Err(error) => {
@@ -153,23 +135,28 @@ impl<const N: usize> AsyncRead for StdinAndExit<N> {
 }
 
 async fn network_main(
-    stream: StdTcpStream,
+    tcp_stream: StdTcpStream,
     addr: SocketAddr,
+    monitor_stream: MonitorStream<Idle>,
     host_key: Arc<Ed25519KeyPair>,
 ) -> anyhow::Result<()> {
     debug!(%addr, "accepted connection");
-    stream.set_nonblocking(true)?;
-    let stream = TcpStream::from_std(stream)?;
+    tcp_stream.set_nonblocking(true)?;
+    let tcp_stream = TcpStream::from_std(tcp_stream)?;
+
+    let monitor_stream = Arc::new(Mutex::new(Some(monitor_stream)));
 
     // FIXME(aws/aws-lc-rs#975) use tokio::spawn() once StreamingDecryptingKey is Send
-    let Ok(conn) = SshTransportConnection::connect(stream, addr, host_key).await else {
+    let Ok(conn) = SshTransportConnection::connect(tcp_stream, addr, host_key).await else {
         return Ok(()); // Some kind of error happened. Has been logged already.
     };
 
     ServiceRunner::new(conn, move |service_name, packet_sender| {
+        let monitor_stream = monitor_stream.clone();
         if service_name == b"ssh-userauth" {
             Some(Box::new(AuthService::new(
                 move |service_name, username, packet_sender| {
+                    let monitor_stream = monitor_stream.clone();
                     debug!(
                         "Authenticated {} for service {}",
                         String::from_utf8_lossy(username),
@@ -177,15 +164,16 @@ async fn network_main(
                     );
                     Some(Box::new(ConnectionService::new(
                         move |channel_type, _type_data, channels| {
+                            let monitor_stream = monitor_stream.clone();
                             debug!(
                                 "New channel of type {}",
                                 String::from_utf8_lossy(channel_type)
                             );
                             tokio::spawn(async move {
-                                debug!("connecting to monitor listener");
-                                let monitor_stream = MonitorStream::connect().await.unwrap();
-
                                 debug!("sending command to monitor");
+                                let monitor_stream =
+                                    monitor_stream.clone().lock().await.take().unwrap();
+
                                 let mut term_stream = monitor_stream
                                     .run_command("/usr/bin/sh")
                                     .await
@@ -209,6 +197,8 @@ async fn network_main(
                                 )
                                 .await;
                                 tracing::debug!("done copying data to and from the terminal");
+
+                                // monitor_stream.terminate_command().await.unwrap();
                             });
                             true
                         },
