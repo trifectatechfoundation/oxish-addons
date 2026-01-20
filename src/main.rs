@@ -1,5 +1,6 @@
 mod fd;
 mod monitor;
+mod pty;
 
 use std::{
     fs::{self, File},

@@ -1,4 +1,0 @@
-[submodule "exec"]
-	path = exec
-	url = git@github.com:squell/oxish.git
-	branch = pvdrz/very-cursed-socket-terminal-glue

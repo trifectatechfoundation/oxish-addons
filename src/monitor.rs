@@ -14,7 +14,7 @@ use std::{
     process::Command,
 };
 
-use process_engine::get_pty;
+use crate::pty::get_pty;
 use tokio::{io::AsyncWriteExt, net::UnixStream};
 use tracing::warn;
 
