@@ -127,7 +127,8 @@ pub(crate) fn accept_request(mut socket: StdUnixStream) -> anyhow::Result<()> {
             // make a new session for the process
             libc::setsid();
             // set the follower as the controlling terminal
-            libc::ioctl(fd_follower, libc::TIOCSCTTY, 0);
+            #[allow(trivial_numeric_casts)]
+            libc::ioctl(fd_follower, libc::TIOCSCTTY as _, 0);
             Ok(())
         })
     };
