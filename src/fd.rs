@@ -36,9 +36,14 @@ fn make_msghdr(
     }
 }
 
+//TODO: can be replaced with [0; _] once MSRV is bumped high enough
+fn zero_array<const N: usize>() -> [u8; N] {
+    [0; N]
+}
+
 pub(crate) fn send_fd(socket: &mut StdUnixStream, mut fd: RawFd) -> io::Result<()> {
     let mut iov = make_iovec();
-    let mut buf = [0; _];
+    let mut buf = zero_array();
     let mut msgh = make_msghdr(&mut iov, &mut buf);
 
     let cmsgp = unsafe { libc::CMSG_FIRSTHDR(&raw mut msgh) };
@@ -65,7 +70,7 @@ pub(crate) async fn recv_fd(socket: &mut UnixStream) -> io::Result<RawFd> {
     socket
         .async_io(Interest::READABLE, || {
             let mut iov = make_iovec();
-            let mut buf = [0; _];
+            let mut buf = zero_array();
             let mut msgh = make_msghdr(&mut iov, &mut buf);
 
             if unsafe { libc::recvmsg(socket.as_raw_fd(), &raw mut msgh, 0) } == -1 {
