@@ -100,6 +100,12 @@ fn listener_main(listener: StdTcpListener, host_key: Arc<Ed25519KeyPair>) -> any
                 }
 
                 if network_pid == 0 {
+                    // Move the network process to its own session so it doesn't get terminated if
+                    // the server exits.
+                    if unsafe { libc::setsid() } == -1 {
+                        return Err(io::Error::last_os_error().into());
+                    }
+
                     tokio::runtime::Runtime::new()?.block_on(network_main(
                         stream,
                         addr,
