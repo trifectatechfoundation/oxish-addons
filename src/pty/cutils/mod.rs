@@ -1,5 +1,6 @@
+use core::ffi::{c_char, c_int, c_long};
 use std::{
-    ffi::{c_char, c_int, c_long, CStr, OsStr, OsString},
+    ffi::{CStr, OsStr, OsString},
     os::unix::prelude::OsStrExt,
 };
 

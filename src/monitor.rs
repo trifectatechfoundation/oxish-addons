@@ -1,7 +1,7 @@
+use core::marker::PhantomData;
 use std::{
     ffi::OsStr,
     io::{self, Read},
-    marker::PhantomData,
     os::{
         fd::{AsFd, AsRawFd},
         unix::{
@@ -71,7 +71,7 @@ impl MonitorStream<CommandRunning> {
             return Err(io::Error::last_os_error());
         }
 
-        Ok(unsafe { FdStream::from_raw(fd) }?)
+        unsafe { FdStream::from_raw(fd) }
     }
 }
 

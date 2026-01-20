@@ -2,13 +2,16 @@ mod fd;
 mod monitor;
 mod pty;
 
+use core::{
+    net::{Ipv4Addr, SocketAddr},
+    pin::Pin,
+    task::Poll,
+};
 use std::{
     fs::{self, File},
     io::{self, Write},
-    net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener, TcpStream as StdTcpStream},
-    pin::Pin,
+    net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream},
     sync::Arc,
-    task::Poll,
 };
 
 use aws_lc_rs::signature::Ed25519KeyPair;
@@ -124,7 +127,7 @@ pub struct StdinAndExit<const N: usize> {
 impl<const N: usize> AsyncRead for StdinAndExit<N> {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        cx: &mut core::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let poll = Pin::new(&mut self.stdin).poll_read(cx, buf);
