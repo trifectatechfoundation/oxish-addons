@@ -1,33 +1,30 @@
-use core::marker::PhantomData;
+use core::{convert::Infallible, marker::PhantomData, net::SocketAddr};
 use std::{
     ffi::OsStr,
     io::{self, Read},
+    net::TcpStream as StdTcpStream,
     os::{
         fd::{AsFd, AsRawFd},
-        unix::{
-            ffi::OsStrExt,
-            net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream},
-            process::CommandExt,
-        },
+        unix::{ffi::OsStrExt, net::UnixStream as StdUnixStream},
     },
     path::Path,
-    process::Command,
+    process::{exit, Command},
+    sync::Arc,
 };
 
-use crate::pty::get_pty;
+use crate::{network_main, pty::get_pty};
+use aws_lc_rs::signature::Ed25519KeyPair;
 use tokio::{io::AsyncWriteExt, net::UnixStream};
-use tracing::warn;
+use tracing::debug;
 
 use crate::fd::{recv_fd, send_fd, FdStream};
 
-const MONITOR_SOCK_ADDR: &str = "/tmp/oxish-monitor.sck";
-
 trait State {}
-impl State for CommandSetup {}
-impl State for CommandRunning {}
+impl State for Idle {}
+impl State for CommandReceived {}
 
-pub(crate) struct CommandSetup {}
-pub(crate) struct CommandRunning {}
+pub(crate) struct Idle {}
+pub(crate) struct CommandReceived {}
 
 #[allow(private_bounds)]
 pub(crate) struct MonitorStream<S: State> {
@@ -35,10 +32,12 @@ pub(crate) struct MonitorStream<S: State> {
     _marker: PhantomData<S>,
 }
 
-impl MonitorStream<CommandSetup> {
-    pub(crate) async fn connect() -> io::Result<Self> {
+impl MonitorStream<Idle> {
+    pub(crate) async fn new(inner: StdUnixStream) -> io::Result<Self> {
+        inner.set_nonblocking(true)?;
+
         Ok(Self {
-            inner: UnixStream::connect(MONITOR_SOCK_ADDR).await?,
+            inner: UnixStream::from_std(inner)?,
             _marker: PhantomData,
         })
     }
@@ -46,7 +45,7 @@ impl MonitorStream<CommandSetup> {
     pub(crate) async fn run_command<P: AsRef<Path> + ?Sized>(
         mut self,
         command: &P,
-    ) -> io::Result<MonitorStream<CommandRunning>> {
+    ) -> io::Result<MonitorStream<CommandReceived>> {
         let command = command.as_ref().as_os_str().as_bytes();
 
         self.inner.write_all(&command.len().to_ne_bytes()).await?;
@@ -55,14 +54,14 @@ impl MonitorStream<CommandSetup> {
         // FIXME(@pvdrz): Maybe receive a message from the monitor acknolwedging that the command
         // is being executed.
 
-        Ok(MonitorStream::<CommandRunning> {
+        Ok(MonitorStream::<CommandReceived> {
             inner: self.inner,
             _marker: PhantomData,
         })
     }
 }
 
-impl MonitorStream<CommandRunning> {
+impl MonitorStream<CommandReceived> {
     pub(crate) async fn recv_pty(mut self) -> io::Result<FdStream> {
         let fd = recv_fd(&mut self.inner).await?;
 
@@ -75,40 +74,44 @@ impl MonitorStream<CommandRunning> {
     }
 }
 
-pub(crate) fn monitor_main() -> anyhow::Result<()> {
-    if let Err(e) = std::fs::remove_file(MONITOR_SOCK_ADDR) {
-        if e.kind() != io::ErrorKind::NotFound {
-            anyhow::bail!("Cannot delete monitor socket file: {e}");
-        }
+pub(crate) fn monitor_main(
+    tcp_stream: StdTcpStream,
+    addr: SocketAddr,
+    host_key: Arc<Ed25519KeyPair>,
+) -> anyhow::Result<Infallible> {
+    // Move the monitor process to its own session so it doesn't get terminated if
+    // the server exits.
+    if unsafe { libc::setsid() } == -1 {
+        return Err(io::Error::last_os_error().into());
     }
 
-    // Create a UNIX listener so each network process can communicate with the monitor
-    let listener = StdUnixListener::bind(MONITOR_SOCK_ADDR)?;
+    let (mut mon_sock, net_sock) = StdUnixStream::pair()?;
 
-    loop {
-        match listener.accept() {
-            Ok((socket, _)) => {
-                if let Err(e) = accept_request(socket) {
-                    warn!("Cannot handle connection to monitor: {e}");
-                }
-            }
-            Err(e) => {
-                warn!("Cannot accept incoming connection to monitor: {e}");
-            }
-        }
+    let network_pid = unsafe { libc::fork() };
+
+    if network_pid == -1 {
+        anyhow::bail!("Cannot fork network process");
     }
-}
 
-pub(crate) fn accept_request(mut socket: StdUnixStream) -> anyhow::Result<()> {
+    if network_pid == 0 {
+        tokio::runtime::Runtime::new()?.block_on(async move {
+            let net_sock = MonitorStream::new(net_sock).await?;
+            network_main(tcp_stream, addr, net_sock, host_key.clone()).await
+        })?;
+        exit(0);
+    }
+
+    debug!("Forked network as {network_pid}");
+
     // Read the length of the command
     let mut buf = [0; size_of::<usize>()];
-    let read_len = socket.read(&mut buf)?;
+    let read_len = mon_sock.read(&mut buf)?;
     assert_eq!(buf.len(), read_len);
 
     // Read the actual command
     let command_len = usize::from_ne_bytes(buf);
     let mut buf = vec![0; command_len];
-    let read_len = socket.read(&mut buf)?;
+    let read_len = mon_sock.read(&mut buf)?;
     assert_eq!(command_len, read_len);
 
     let command = OsStr::from_bytes(&buf);
@@ -116,22 +119,20 @@ pub(crate) fn accept_request(mut socket: StdUnixStream) -> anyhow::Result<()> {
     tracing::debug!("opening PTY");
     let pty = get_pty()?;
 
+    // Set the PTY as the controlling terminal of the session.
+    let fd_follower = pty.follower.as_fd().as_raw_fd();
+    if unsafe {
+        #[allow(trivial_numeric_casts)]
+        libc::ioctl(fd_follower, libc::TIOCSCTTY as _, 0)
+    } == -1
+    {
+        return Err(io::Error::last_os_error().into());
+    };
+
     tracing::debug!("sending PTY to network");
-    send_fd(&mut socket, pty.leader.as_raw_fd())?;
+    send_fd(&mut mon_sock, pty.leader.as_raw_fd())?;
 
     let mut command = Command::new(command);
-    let fd_follower = pty.follower.as_fd().as_raw_fd();
-
-    unsafe {
-        command.pre_exec(move || {
-            // make a new session for the process
-            libc::setsid();
-            // set the follower as the controlling terminal
-            #[allow(trivial_numeric_casts)]
-            libc::ioctl(fd_follower, libc::TIOCSCTTY as _, 0);
-            Ok(())
-        })
-    };
 
     command
         .stdin(pty.follower.try_clone()?)
@@ -139,7 +140,10 @@ pub(crate) fn accept_request(mut socket: StdUnixStream) -> anyhow::Result<()> {
         .stderr(pty.follower);
 
     tracing::debug!("running command: {:?}", command.get_program());
-    let _child = command.spawn()?;
+    match command.status()?.code() {
+        Some(code) => tracing::debug!("command exited with status code: {}", code),
+        None => tracing::debug!("command exited with unknown status code"),
+    }
 
-    Ok(())
+    exit(0);
 }
