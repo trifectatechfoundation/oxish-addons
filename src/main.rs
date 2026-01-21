@@ -85,7 +85,7 @@ fn listener_main(listener: StdTcpListener, host_key: Arc<Ed25519KeyPair>) -> any
                 }
 
                 if monitor_pid == 0 {
-                    return monitor_main(stream, addr, host_key.clone());
+                    match monitor_main(stream, addr, host_key.clone())? {}
                 }
 
                 if !already_ignoring {
