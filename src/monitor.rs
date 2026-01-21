@@ -1,9 +1,8 @@
-use core::marker::PhantomData;
+use core::{convert::Infallible, marker::PhantomData, net::SocketAddr};
 use std::{
-    convert::Infallible,
     ffi::OsStr,
     io::{self, Read},
-    net::{SocketAddr, TcpStream as StdTcpStream},
+    net::TcpStream as StdTcpStream,
     os::{
         fd::{AsFd, AsRawFd},
         unix::{ffi::OsStrExt, net::UnixStream as StdUnixStream},
