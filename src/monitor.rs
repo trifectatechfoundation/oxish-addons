@@ -1,5 +1,6 @@
 use core::marker::PhantomData;
 use std::{
+    convert::Infallible,
     ffi::OsStr,
     io::{self, Read},
     net::{SocketAddr, TcpStream as StdTcpStream},
@@ -8,7 +9,7 @@ use std::{
         unix::{ffi::OsStrExt, net::UnixStream as StdUnixStream},
     },
     path::Path,
-    process::Command,
+    process::{exit, Command},
     sync::Arc,
 };
 
@@ -78,7 +79,7 @@ pub(crate) fn monitor_main(
     tcp_stream: StdTcpStream,
     addr: SocketAddr,
     host_key: Arc<Ed25519KeyPair>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Infallible> {
     // Move the monitor process to its own session so it doesn't get terminated if
     // the server exits.
     if unsafe { libc::setsid() } == -1 {
@@ -98,7 +99,7 @@ pub(crate) fn monitor_main(
             let net_sock = MonitorStream::new(net_sock).await?;
             network_main(tcp_stream, addr, net_sock, host_key.clone()).await
         })?;
-        return Ok(());
+        exit(0);
     }
 
     debug!("Forked network as {network_pid}");
@@ -145,5 +146,5 @@ pub(crate) fn monitor_main(
         None => tracing::debug!("command exited with unknown status code"),
     }
 
-    Ok(())
+    exit(0);
 }
