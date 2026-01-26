@@ -1,4 +1,3 @@
-#![allow(unused)]
 use std::{
     ffi::OsStr,
     io::{self, Read, Write},
